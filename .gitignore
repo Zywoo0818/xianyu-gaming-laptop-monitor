@@ -1,0 +1,14 @@
+.venv/
+data/
+reports/
+logs/
+dist/
+vendor/
+_ref/
+.tmp/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+*.zip
