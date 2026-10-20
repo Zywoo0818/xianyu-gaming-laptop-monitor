@@ -118,7 +118,7 @@ def _build(watch: Watch, rows: list[PriceRow], seed: int) -> list[dict[str, Any]
 
     # 骗子/异常：定金、进水、账号锁
     add(f"{pool[0].name} RTX{gpu.upper()} 定金 500 先到先得", pool[0].price * 0.35, 40)
-    add(f"{pool[0].name} 进水 不开机 会修的来 RTX{gpu.upper()}", pool[0].price * 0.45, 90)
+    add(f"{pool[0].name} 进水 黑屏 会修的来 RTX{gpu.upper()}", pool[0].price * 0.45, 90)
     add(f"{pool[0].name} RTX{gpu.upper()} 有账号锁 便宜出", pool[0].price - 600, 120)
 
     # 该被品类闸门排除的：轻薄本、苹果、工作站、无 N 卡

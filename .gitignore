@@ -12,3 +12,11 @@ __pycache__/
 *.db-wal
 *.db-shm
 *.zip
+*.log
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 个人行情表（含收机价，不上传）
+笔电行情.xlsx
+~$*.xlsx

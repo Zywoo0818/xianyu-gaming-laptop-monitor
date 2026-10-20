@@ -4,7 +4,7 @@
 1. 品类闸门：苹果/华为排除；工作站、轻薄本、台式机排除；必须识别到英伟达显卡。
 2. 参考价：先用你的行情表按“型号 + 显卡”匹配，匹配不到用同显卡中位数。
 3. 价差：必须比参考价低至少 min_gap（默认 100），否则直接不看。
-4. 打分：价差深度 + 显卡档位 + 品牌权重 + 新鲜度 + 卖家质量 - 想要人数 - 商家/骗子风险。
+4. 打分：价差深度 + 显卡档位 + 品牌权重 + 新鲜度 + 成色 - 想要人数 - 商家风险。
 """
 from __future__ import annotations
 
@@ -21,7 +21,27 @@ from .textmatch import hit_words
 VERDICTS = ("强烈推荐", "推荐", "可看", "观察", "跳过", "异常", "排除")
 
 LAPTOP_WORDS = ("笔记本", "游戏本", "本本", "laptop", "notebook", "手提")
-DESKTOP_HINTS = ("8pin", "6pin", "三风扇", "单卡", "矿卡", "显卡坞", "机箱", "水冷", "台式")
+DESKTOP_HINTS = ("8pin", "6pin", "单卡", "矿卡", "显卡坞", "机箱")
+
+FATAL_RAM_GB = 8
+FATAL_DISK_GB = 120
+# 「无内存插槽」「无硬盘位」是描述扩展能力，不代表缺件。
+REJECT_BLOCKED_TAILS = ("位", "槽", "插", "卡", "接", "盖", "盒", "架", "托", "口")
+_CAPABILITY_WORDS = ("最大", "最高", "支持", "可扩", "可加", "可升级", "可达", "扩展至", "加装")
+_UPGRADE_PREFIXES = ("已升级", "已经升级", "已加装", "已经加装")
+_RAM_CONTEXT = r"(?:运行内存|内存|ram|ddr[45]?)"
+_DISK_CONTEXT = r"(?:固态硬盘|硬盘|固态|ssd|nvme|存储)"
+_UPGRADE_VALUE = re.compile(
+    r"(?:已升级到|已经升级到|已升级|已经升级|已加装|已经加装)\s*[:：]?\s*(\d{1,4})\s*([gt])"
+)
+_DISK_NOUNS = ("硬盘", "固态", "ssd", "nvme", "存储")
+
+# 硬排除：即使标题写了“游戏本”，命中这些也直接丢（工作站/台式/求购等不是整机游戏本）。
+# 否定句（无拆机/不是工作站）和对比句（比台式机轻）会被 hit_words / CONTRAST_PREFIXES 放行。
+HARD_EXCLUDE = (
+    "移动工作站", "工作站", "台式机", "台式", "迷你主机", "一体机",
+    "求购", "收一台", "租赁", "出租", "拆机", "模型", "代拍",
+)
 
 # 常见游戏本系列：标题里出现这些，即使没写“笔记本”也认
 GAMING_SERIES = (
@@ -33,11 +53,30 @@ GAMING_SERIES = (
     "未来人类", "火影", "ge62", "ge75", "gp75", "gl75", "ge66", "gs66", "msi",
 )
 
+# 明确只卖配件的标题：即使带上机型或显卡词也直接丢；「送/带/含/附/赠」开头的赠品除外
+ACCESSORY_STRONG = (
+    "电脑包", "内胆包", "双肩包", "鼠标垫", "散热底座", "硬盘盒", "键盘膜",
+    "保护壳", "保护套", "屏幕总成", "贴膜", "贴纸", "防尘塞",
+    "配件机", "当配件", "配件出", "配件价", "配件专用", "拆机配件",
+    "只出配件", "单出配件", "卖配件",
+)
+
+# 配件和整机都可能出现的词：标题里没有整机线索时才丢
+ACCESSORY_WEAK = (
+    "电源适配器", "充电器", "充电宝", "移动电源", "数据线", "充电线",
+    "电源线", "鼠标", "键盘", "背包", "支架", "散热器", "底座", "托架",
+    "腕托", "掌托", "扩展坞", "拓展坞", "内存条", "固态硬盘", "移动硬盘",
+    "u盘", "读卡器", "耳机", "音箱", "手写笔", "触控笔", "转接头",
+    "转换器", "网线", "显示器", "电脑桌", "电脑椅",
+)
+
+GIFT_PREFIXES = ("送", "带", "含", "附", "赠")
+CONTRAST_PREFIXES = ("比", "不如", "胜过", "优于", "不是", "并非")
+_PREFIX_SPLIT = re.compile(r"[，,。；;、！!？?|/\s]+")
+
 
 def _spec_adjust(title: str, ref: float) -> tuple[float, list[str]]:
     """按标题里的内存/硬盘容量对行情表价格做加减（只在有明确上下文时生效）。"""
-    import re
-
     lowered = title.casefold()
     delta = 0.0
     notes: list[str] = []
@@ -78,10 +117,188 @@ class Gate:
     reason: str
     gpu: gpus.GpuInfo | None
     brand: brands.BrandInfo
+    fatal: bool = False
+
+
+def _near_word(text: str, index: int, words: tuple[str, ...], width: int = 6) -> str:
+    segment = _PREFIX_SPLIT.split(text[max(0, index - width) : index])[-1]
+    return next((word for word in words if word in segment), "")
+
+
+def _ungifted_hit(title: str, words: tuple[str, ...]) -> str:
+    lowered = title.casefold()
+    for word in words:
+        needle = word.casefold()
+        if not hit_words(title, [word]):
+            continue
+        index = lowered.find(needle)
+        while index >= 0:
+            if not _near_word(lowered, index, GIFT_PREFIXES):
+                return word
+            index = lowered.find(needle, index + len(needle))
+    return ""
+
+
+def _accessory_hit(title: str) -> str:
+    strong = _ungifted_hit(title, ACCESSORY_STRONG)
+    if strong:
+        return strong
+    lowered = title.casefold()
+    has_laptop = any(word.casefold() in lowered for word in LAPTOP_WORDS) or any(
+        series in lowered for series in GAMING_SERIES
+    )
+    if has_laptop:
+        return ""
+    return _ungifted_hit(title, ACCESSORY_WEAK)
+
+
+def _hard_exclude_hit(title: str) -> str:
+    lowered = title.casefold()
+    for word in HARD_EXCLUDE:
+        needle = word.casefold()
+        if not hit_words(title, [word]):
+            continue
+        index = lowered.find(needle)
+        while index >= 0:
+            if not _near_word(lowered, index, CONTRAST_PREFIXES, width=3):
+                return word
+            index = lowered.find(needle, index + len(needle))
+    return _accessory_hit(title)
+
+
+def _capacity_allowed(text: str, start: int) -> bool:
+    """「最大支持 32G」是能力值，「已升级到 16G」才是实际容量。"""
+    prefix = text[max(0, start - 24) : start]
+    cut = 0
+    # 只看当前这半句、当前这个容量之后的部分，避免上一句话的「支持」窜进来。
+    for pattern in (r"[，,。；;、！!？?|/\n（）()【】\[\]]", r"\d+\s*[gt]"):
+        for match in re.finditer(pattern, prefix):
+            cut = max(cut, match.end())
+    segment = prefix[cut:]
+    if any(word in segment for word in _UPGRADE_PREFIXES):
+        return True
+    return not any(word in segment for word in _CAPABILITY_WORDS)
+
+
+def _upgrade_disk_context(text: str, match: re.Match) -> bool:
+    before = text[max(0, match.start() - 8) : match.start()]
+    after = text[match.end() : match.end() + 4]
+    return any(word in before or word in after for word in _DISK_NOUNS)
+
+
+def _ram_gb(text: str) -> list[int]:
+    """解析内存容量；只认明确的内存上下文或 4G*2 / 4G+4G 这类成对写法。"""
+    values: list[int] = []
+
+    def add(number: int) -> None:
+        if 0 < number <= 256:
+            values.append(number)
+
+    for match in re.finditer(
+        rf"{_RAM_CONTEXT}\s*[:：]?\s*(\d{{1,2}})\s*g(?:\s*[*×x]\s*(\d))?", text
+    ):
+        if _capacity_allowed(text, match.start()):
+            add(int(match.group(1)) * (int(match.group(2)) if match.group(2) else 1))
+    for match in re.finditer(
+        rf"(?<![\d.])(\d{{1,2}})\s*g\s*(?:运行内存|内存|ram|ddr[45]?)", text
+    ):
+        if _capacity_allowed(text, match.start()):
+            add(int(match.group(1)))
+    # 成对写法本身就是内存特征（显卡不会 4G*2 / 4G+4G）。
+    for match in re.finditer(r"(?<![\d.])(\d{1,2})\s*g\s*[*×x]\s*(\d)", text):
+        if _capacity_allowed(text, match.start()):
+            add(int(match.group(1)) * int(match.group(2)))
+    for match in re.finditer(r"(?<![\d.])(\d{1,2})\s*g\s*\+\s*(\d{1,2})\s*g(?!\w)", text):
+        if _capacity_allowed(text, match.start()):
+            add(int(match.group(1)) + int(match.group(2)))
+    for match in _UPGRADE_VALUE.finditer(text):
+        value = int(match.group(1))
+        if match.group(2) == "t" or value >= 120 or _upgrade_disk_context(text, match):
+            continue
+        add(value)
+    return values
+
+
+def _disk_gb(text: str) -> list[int]:
+    """解析硬盘容量；小容量只认明确上下文，避免把显存 4G/6G 当成硬盘。"""
+    values: list[int] = []
+
+    def add(number: int) -> None:
+        if 0 < number <= 8192:
+            values.append(number)
+
+    for match in re.finditer(rf"{_DISK_CONTEXT}\s*[:：]?\s*(\d{{2,4}})\s*g", text):
+        if _capacity_allowed(text, match.start()):
+            add(int(match.group(1)))
+    for match in re.finditer(rf"(?<![\d.])(\d{{2,4}})\s*g\s*{_DISK_CONTEXT}", text):
+        if _capacity_allowed(text, match.start()):
+            add(int(match.group(1)))
+    for match in re.finditer(rf"{_DISK_CONTEXT}\s*[:：]?\s*([12])\s*t(?:b)?", text):
+        if _capacity_allowed(text, match.start()):
+            add(int(match.group(1)) * 1024)
+    for match in re.finditer(rf"(?<![\d.])([12])\s*t(?:b)?\s*{_DISK_CONTEXT}", text):
+        if _capacity_allowed(text, match.start()):
+            add(int(match.group(1)) * 1024)
+    for match in re.finditer(r"(?<![\d.])([12])\s*t(?:b)?(?![a-z])", text):
+        if _capacity_allowed(text, match.start()):
+            add(int(match.group(1)) * 1024)
+    # 没有上下文的 128G/512G 基本只会是硬盘，显存不会到这个量级。
+    for match in re.finditer(r"(?<![\d.])(\d{3,4})\s*g(?![a-z])", text):
+        if _capacity_allowed(text, match.start()):
+            add(int(match.group(1)))
+    for match in _UPGRADE_VALUE.finditer(text):
+        value = int(match.group(1))
+        if match.group(2) == "t":
+            add(value * 1024)
+        elif value >= 120 or _upgrade_disk_context(text, match):
+            add(value)
+    return values
+
+
+def _fatal_reject_reason(listing: Listing, cfg: Config) -> str:
+    """商家/故障硬规则：命中就不进入打分和报表。"""
+    text = f"{listing.title}\n{listing.desc or ''}".casefold()
+    missing = hit_words(
+        text,
+        cfg.signals.merchant_reject,
+        blocked_tails=REJECT_BLOCKED_TAILS,
+    )
+    if missing:
+        return "疑似商家：空机出售" if "空机" in missing else "疑似商家：缺少内存/硬盘"
+
+    ram = max(_ram_gb(text), default=0)
+    if 0 < ram < FATAL_RAM_GB:
+        return f"疑似商家：低配（内存 {ram}G）"
+
+    disk = max(_disk_gb(text), default=0)
+    if 0 < disk < FATAL_DISK_GB:
+        return f"疑似商家：低配（硬盘 {disk}G）"
+
+    boot = hit_words(text, cfg.signals.boot_reject)
+    if boot:
+        return f"开机故障：{boot[0]}"
+
+    merchant = hit_words(listing.title, cfg.signals.merchant)
+    seller = (listing.seller or "").casefold()
+    seller_hit = next(
+        (word for word in cfg.filters.seller_exclude if word and word.casefold() in seller),
+        "",
+    )
+    if merchant or seller_hit:
+        hits = [*merchant]
+        if seller_hit and seller_hit not in hits:
+            hits.append(seller_hit)
+        return "疑似商家：" + "、".join(hits[:2])
+    return ""
 
 
 def gate(listing: Listing, cfg: Config) -> Gate:
     title = listing.title
+    fatal = _fatal_reject_reason(listing, cfg)
+    if fatal:
+        brand = brands.detect(title, listing.seller)
+        return Gate(False, fatal, None, brand, fatal=True)
+
     lowered = title.casefold()
     brand = brands.detect(title, listing.seller)
     if brand.excluded:
@@ -95,14 +312,20 @@ def gate(listing: Listing, cfg: Config) -> Gate:
     if gpu is None:
         return Gate(False, "识别不到英伟达显卡，排除", None, brand)
 
-    if any(word.casefold() in lowered for word in cfg.category.exclude):
+    # 硬排除：工作站/台式/求购/配件。否定句（无拆机）和对比句（比台式机轻）放行
+    hard = _hard_exclude_hit(title)
+    if hard:
+        return Gate(False, f"含排除词「{hard}」，不是整机游戏本", gpu, brand)
+
+    # 软排除：轻薄/商务/办公等，标题写了“游戏本”时允许豁免（卖家常叠词）
+    if hit_words(title, cfg.category.exclude):
         if "游戏本" not in lowered:
             return Gate(False, "标题显示是轻薄本/商务本/台式机", gpu, brand)
     if any(word.casefold() in lowered for word in DESKTOP_HINTS):
         return Gate(False, "台式机显卡/配件，不是整机", gpu, brand)
-    # 台式显卡的描述特征：显卡 + 风扇/接口/供电/这张
+    # 台式显卡的描述特征：显卡 + 挡板/插上/这张 等
     if "显卡" in lowered and any(
-        word in lowered for word in ("风扇", "接口", "这张", "插上", "供电", "散热", "挡板")
+        word in lowered for word in ("挡板", "插上", "这张", "8pin", "6pin", "矿卡", "单卡", "显卡坞")
     ):
         return Gate(False, "台式显卡，不是笔记本", gpu, brand)
     return Gate(True, "", gpu, brand)
@@ -123,11 +346,6 @@ def _condition(title: str, cfg: Config) -> tuple[float, list[str], list[str]]:
     if bad:
         score -= min(12.0, 4.0 * len(bad))
         flags.append("瑕疵：" + "、".join(bad[:3]))
-
-    merchant = hit_words(title, cfg.signals.merchant)
-    if merchant:
-        score += cfg.scoring.merchant_penalty
-        flags.append("疑似商家：" + "、".join(merchant[:2]))
 
     bait = hit_words(title, cfg.signals.bait)
     if bait:
@@ -184,7 +402,6 @@ def analyze(
     table_rows: list[PriceRow],
     cfg: Config,
     now_ms: int | None = None,
-    audit: dict | None = None,
 ) -> Analysis:
     now_ms = now_ms or int(datetime.now(tz=timezone.utc).timestamp() * 1000)
     result = gate(listing, cfg)
@@ -196,6 +413,7 @@ def analyze(
             ratio=1.0,
             flags=[result.reason],
             excluded=True,
+            fatal=result.fatal,
         )
     assert result.gpu is not None
 
@@ -293,30 +511,6 @@ def analyze(
         suspicious = True
         score = min(score, 35.0)
 
-    if audit:
-        if audit.get("has_dji"):
-            return Analysis(
-                score=0.0,
-                verdict="排除",
-                ref_price=ref,
-                ratio=round(listing.price / ref, 4),
-                flags=["卖家在卖大疆/无人机，按要求判定为骗子"],
-                excluded=True,
-                gpu=result.gpu.model,
-                brand=result.brand.name,
-                table_name=table_name,
-                ref_source=ref_source,
-            )
-        if audit.get("apple_hits", 0) >= 3:
-            score -= 8
-            flags.append(f"卖家还在卖 {audit['apple_hits']} 件苹果设备")
-        if audit.get("merchant"):
-            score += cfg.scoring.audited_merchant_penalty
-            flags.append("卖家是商家/回收号（主页确认）")
-        if audit.get("in_sale", 0) > 40:
-            score -= 4
-            flags.append(f"在售 {audit['in_sale']} 件，明显是商家")
-
     score = round(max(0.0, min(100.0, score)), 1)
 
     if suspicious:
@@ -357,7 +551,7 @@ def passes_filters(listing: Listing, watch: Watch, cfg: Config) -> bool:
         word in listing.location for word in cfg.filters.location_allow if word
     ):
         return False
-    if any(word.casefold() in listing.title.casefold() for word in cfg.filters.exclude if word):
+    if hit_words(listing.title, cfg.filters.exclude):
         return False
     return True
 

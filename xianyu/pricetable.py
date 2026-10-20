@@ -32,14 +32,16 @@ HEADER_ALIASES = {
 
 SKIP_SHEETS = {"内存", "硬盘", "Sheet1", "说明"}
 
-# 行情表里没有的显卡，用相邻档位估算（倍数）
+# 行情表里没有的显卡，用相邻档位估算（倍数）。键一律用剥掉 Ti/Super 的基础档位。
 PROXY_GPU = {
-    "3050ti": ("3050", 1.05),
+    "1050": ("1060", 0.8),
     "1650": ("1060", 1.0),
     "1070": ("1060", 1.25),
     "1080": ("1060", 1.45),
+    "2050": ("2060", 0.78),
     "2070": ("2060", 1.2),
     "2080": ("2060", 1.4),
+    "3050": ("3060", 0.85),
     "3070": ("3060", 1.25),
     "3080": ("3060", 1.5),
     "4070": ("4060", 1.3),
@@ -48,6 +50,8 @@ PROXY_GPU = {
     "5050": ("4060", 1.1),
     "5060": ("4060", 1.2),
     "5070": ("4060", 1.5),
+    "5080": ("4060", 1.7),
+    "5090": ("4060", 2.2),
 }
 
 
@@ -275,8 +279,14 @@ def load_table(path: Path) -> list[PriceRow]:
     return rows
 
 
-def _gpu_key(gpu: str) -> str:
-    return _norm_gpu(gpu)
+def _base_key(gpu: str) -> str:
+    """剥掉 Ti / Super 后缀，得到行情档位：3060Ti 和 3060 用同一档行情。"""
+    return re.sub(r"(?:ti|super)$", "", _norm_gpu(gpu))
+
+
+def _median(rows: list[PriceRow]) -> float | None:
+    prices = sorted(row.price for row in rows if row.price > 0)
+    return float(statistics.median(prices)) if prices else None
 
 
 def match_reference(
@@ -288,17 +298,25 @@ def match_reference(
 ) -> tuple[float | None, str, str]:
     """返回 (参考价, 命中的行情表名称, 来源说明)。
 
-    优先按“型号名包含”，其次按同显卡中位数。
+    先在同显卡档位里按“型号名包含”匹配，其次用该档中位数；
+    这一档表里没有才按相邻档位估算——绝不跨档拿型号名去撞价。
     """
     if not rows:
         return None, "", "no-table"
 
     title_norm = normalize_name(title)
     title_fold = fold_name(title)
-    key = _gpu_key(gpu)
+    want = _base_key(gpu)
 
-    same_gpu = [row for row in rows if _gpu_key(row.gpu) == key] if key else []
-    pool = same_gpu or rows
+    pool = [row for row in rows if _base_key(row.gpu) == want] if want else []
+    if not pool:
+        proxy = PROXY_GPU.get(want)
+        if proxy:
+            proxy_gpu, factor = proxy
+            middle = _median([row for row in rows if _base_key(row.gpu) == proxy_gpu])
+            if middle:
+                return middle * factor, f"{gpu}（按 {proxy_gpu} 行情 ×{factor}）", "table/proxy"
+        return None, "", "no-match"
 
     best: PriceRow | None = None
     for row in pool:
@@ -319,17 +337,7 @@ def match_reference(
     if best is not None:
         return best.price, best.name, "table/alias"
 
-    if same_gpu:
-        prices = sorted(row.price for row in same_gpu if row.price > 0)
-        if prices:
-            return float(statistics.median(prices)), f"{gpu} 同档中位数", "table/gpu"
-
-    proxy = PROXY_GPU.get(key)
-    if proxy:
-        proxy_gpu, factor = proxy
-        proxy_rows = [row for row in rows if _gpu_key(row.gpu) == proxy_gpu]
-        prices = sorted(row.price for row in proxy_rows if row.price > 0)
-        if prices:
-            middle = statistics.median(prices) * factor
-            return float(middle), f"{gpu}（按 {proxy_gpu} 行情 ×{factor}）", "table/proxy"
+    middle = _median(pool)
+    if middle:
+        return middle, f"{gpu} 同档中位数", "table/gpu"
     return None, "", "no-match"

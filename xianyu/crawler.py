@@ -28,6 +28,14 @@ NEXT_PAGE = (
     ":not([disabled])"
 )
 CAPTURE_TIMEOUT_MS = 25_000
+FILTER_CLICK_TIMEOUT_MS = 8_000
+FILTER_CAPTURE_TIMEOUT_MS = 10_000
+FILTER_SETTLE_MS = 1_200
+DETAIL_DESC_SELECTOR = "[class*='desc--']"
+DETAIL_WAIT_TIMEOUT_MS = 25_000
+PERSONAL_FILTER_TEXT = "个人闲置"
+NEW_PUBLISH_FILTER_TEXT = "新发布"
+NEW_PUBLISH_OPTION_TEXT = "最新"
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/{version} Safari/537.36"
@@ -238,6 +246,125 @@ class Crawler:
             time.sleep(0.2)
         raise CaptureTimeout(f"等待第 {page_number} 页搜索结果超时")
 
+    def _wait_capture_settled(
+        self,
+        page_number: int,
+        page: Page | None = None,
+        timeout_ms: int = FILTER_CAPTURE_TIMEOUT_MS,
+    ) -> dict:
+        """等筛选请求都落地：收到结果后再等一小段静默期，取最后一次。"""
+        deadline = time.monotonic() + timeout_ms / 1000
+        last: dict | None = None
+        settled_at: float | None = None
+        ticks = 0
+        while time.monotonic() < deadline:
+            found = None
+            for index, (number, _payload) in enumerate(self._captures):
+                if number == page_number:
+                    found = index
+            if found is not None:
+                _number, last = self._captures.pop(found)
+                settled_at = time.monotonic()
+            elif last is not None and settled_at is not None:
+                if (time.monotonic() - settled_at) * 1000 >= FILTER_SETTLE_MS:
+                    return last
+            ticks += 1
+            if page is not None and ticks % 10 == 0:
+                self._check_page_state(page)
+            time.sleep(0.2)
+        if last is not None:
+            return last
+        raise CaptureTimeout(f"等待第 {page_number} 页搜索结果超时")
+
+    def _dismiss_ad_popup(self, page: Page) -> None:
+        close = page.locator("div[class*='closeIconBg']")
+        try:
+            if close.count():
+                close.first.click(timeout=1200)
+                self.log("  · 已关闭广告弹窗")
+        except Exception:  # noqa: BLE001 - 弹窗可有可无，关不掉不影响筛选
+            pass
+
+    @staticmethod
+    def _personal_filter_state(page: Page) -> bool | None:
+        return page.evaluate(
+            """() => {
+                const labels = [...document.querySelectorAll('span[class*="search-checkbox-label"]')];
+                const label = labels.find(el => el.textContent.trim() === '个人闲置');
+                if (!label) return null;
+                const item = label.closest('div[class*="search-checkbox-item-container"]');
+                return !!(item && item.querySelector('[class*="search-checkbox-checked"]'));
+            }"""
+        )
+
+    @staticmethod
+    def _new_publish_state(page: Page) -> bool | None:
+        return page.evaluate(
+            """() => {
+                const titles = [...document.querySelectorAll('span[class*="search-select-title"]')];
+                const texts = titles.map(el => el.textContent.trim());
+                if (texts.includes('最新')) return true;
+                if (texts.includes('新发布')) return false;
+                return null;
+            }"""
+        )
+
+    def _apply_search_filters(self, page: Page) -> dict | None:
+        """搜索页先选「个人闲置」和「新发布 → 最新」，返回筛选后的第一页数据。
+
+        复选框和排序已生效时直接跳过，避免重复点击把筛选取消。
+        任何一步点不到都只记日志并沿用上一步结果，不让搜索整体失败。
+        """
+        self._dismiss_ad_popup(page)
+        time.sleep(random.uniform(0.6, 1.2))
+        try:
+            page.wait_for_selector(
+                'div[class*="search-filter"]', timeout=5000, state="attached"
+            )
+        except PWTimeout:
+            pass
+        latest: dict | None = None
+
+        personal_active = self._personal_filter_state(page)
+        if personal_active is None:
+            self.log(f"  ! 页面上没找到「{PERSONAL_FILTER_TEXT}」，跳过")
+        elif personal_active:
+            self.log(f"  · 「{PERSONAL_FILTER_TEXT}」已勾选")
+        else:
+            self._captures.clear()
+            try:
+                page.click(f"text={PERSONAL_FILTER_TEXT}", timeout=FILTER_CLICK_TIMEOUT_MS)
+                self.log(f"  → 已点「{PERSONAL_FILTER_TEXT}」")
+                latest = self._wait_capture_settled(1, page)
+            except PWTimeout:
+                self.log(f"  ! 页面上没找到「{PERSONAL_FILTER_TEXT}」，跳过")
+            except CaptureTimeout:
+                self.log(f"  ! 点「{PERSONAL_FILTER_TEXT}」后没等到新结果，沿用当前结果")
+
+        publish_state = self._new_publish_state(page)
+        if publish_state is None:
+            self.log(
+                f"  ! 页面上没找到「{NEW_PUBLISH_FILTER_TEXT} / {NEW_PUBLISH_OPTION_TEXT}」，跳过"
+            )
+        elif publish_state:
+            self.log(f"  · 已按「{NEW_PUBLISH_OPTION_TEXT}」排序")
+        else:
+            self._captures.clear()
+            try:
+                page.click(f"text={NEW_PUBLISH_FILTER_TEXT}", timeout=FILTER_CLICK_TIMEOUT_MS)
+                time.sleep(random.uniform(0.6, 1.2))
+                page.click(f"text={NEW_PUBLISH_OPTION_TEXT}", timeout=FILTER_CLICK_TIMEOUT_MS)
+                self.log(f"  → 已选「{NEW_PUBLISH_FILTER_TEXT} / {NEW_PUBLISH_OPTION_TEXT}」")
+                latest = self._wait_capture_settled(1, page)
+            except PWTimeout:
+                self.log(
+                    f"  ! 页面上没找到「{NEW_PUBLISH_FILTER_TEXT} / {NEW_PUBLISH_OPTION_TEXT}」，跳过"
+                )
+            except CaptureTimeout:
+                self.log(f"  ! 选「{NEW_PUBLISH_FILTER_TEXT}」后没等到新结果，沿用当前结果")
+
+        return latest
+
     # ------------------------------------------------------------------ helpers
     def _check_page_state(self, page: Page) -> None:
         url = page.url or ""
@@ -253,7 +380,7 @@ class Crawler:
             raise RiskControl("触发人机验证，请用有头模式手动过一下，或稍后再试")
         if "非法访问" in text:
             raise CrawlError(
-                "闲鱼把本次访问判为“非法访问”。请用 run_scan.bat --headed 重试；"
+                "闲鱼把本次访问判为“非法访问”。请用 scan.bat --headed 重试；"
                 "或在 config.yaml 里填一个真实浏览器的 browser.user_agent"
             )
         if "登录后" in text and "扫码" in text and len(text) < 3000:
@@ -265,6 +392,63 @@ class Crawler:
         if high > 0:
             time.sleep(random.uniform(low, high))
 
+    # ------------------------------------------------------------------- detail
+    def fetch_details(self, listings: list[Listing]) -> dict[str, str]:
+        """逐条打开详情页，取描述正文；失败只跳过当前条目。
+
+        描述元素大约 10–15 秒才渲染出来，用 wait_for_function 等正文出现，
+        比固定 sleep 稳。登录/风控直接向上抛，由调用方中止详情阶段。
+        """
+        if not listings:
+            return {}
+        if self._ctx is None:
+            raise CrawlError("Crawler 未启动")
+        page = self._ctx.new_page()
+        found: dict[str, str] = {}
+        total = len(listings)
+        try:
+            for index, listing in enumerate(listings, start=1):
+                self.log(f"  详情 {index}/{total}：{listing.title[:30]}")
+                try:
+                    page.goto(listing.url, wait_until="domcontentloaded")
+                    self._check_page_state(page)
+                    page.wait_for_function(
+                        """(selector) => [...document.querySelectorAll(selector)]
+                            .some(el => (el.innerText || '').trim().length > 10)""",
+                        arg=DETAIL_DESC_SELECTOR,
+                        timeout=DETAIL_WAIT_TIMEOUT_MS,
+                    )
+                    text = page.evaluate(
+                        """(selector) => {
+                            let best = '';
+                            for (const el of document.querySelectorAll(selector)) {
+                                const value = (el.innerText || '').trim();
+                                if (value.length > best.length) best = value;
+                            }
+                            return best;
+                        }""",
+                        DETAIL_DESC_SELECTOR,
+                    )
+                    if text:
+                        found[listing.item_id] = text
+                    else:
+                        self.log(f"  ! 详情 {index}/{total} 没有描述正文，跳过")
+                except PWTimeout:
+                    self._check_page_state(page)
+                    self.log(f"  ! 详情 {index}/{total} 等待描述超时，跳过")
+                except (LoginRequired, RiskControl):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"  ! 详情 {index}/{total} 失败：{str(exc)[:100]}")
+                if index < total:
+                    self._sleep()
+        finally:
+            try:
+                page.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return found
+
     # ------------------------------------------------------------------- search
     def search(self, watch: Watch, pages: int | None = None) -> list[Listing]:
         if self._ctx is None:
@@ -272,7 +456,7 @@ class Crawler:
         if self.cfg.browser.require_login:
             names = {cookie["name"] for cookie in self._ctx.cookies()}
             if "unb" not in names:
-                raise LoginRequired("未登录或登录态已失效：请先运行 run_login.bat 扫码登录")
+                raise LoginRequired("未登录或登录态已失效：请先运行 login.bat 扫码登录")
         pages = max(1, int(pages or watch.pages or self.cfg.scan.pages))
         page = self._ctx.new_page()
         results: list[Listing] = []
@@ -288,6 +472,8 @@ class Crawler:
             self._check_page_state(page)
 
             payload = self._wait_capture(1, page)
+            self.log(f"  → 应用搜索筛选：{PERSONAL_FILTER_TEXT} + {NEW_PUBLISH_FILTER_TEXT}·{NEW_PUBLISH_OPTION_TEXT}")
+            payload = self._apply_search_filters(page) or payload
             for index in range(1, pages + 1):
                 listings = self._consume(payload, watch)
                 if index == 1 and not listings:

@@ -43,24 +43,11 @@ def _loads(value: Any, fallback: list) -> list:
     return parsed if isinstance(parsed, list) else fallback
 
 
-def _load_dict(value: Any) -> dict:
-    if not value:
-        return {}
-    if isinstance(value, dict):
-        return value
-    try:
-        parsed = json.loads(value)
-    except (TypeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
 def row_to_item(row: sqlite3.Row | dict, now_ms: int) -> dict:
     data = dict(row)
     data["reasons"] = _loads(data.get("reasons"), [])
     data["flags"] = _loads(data.get("flags"), [])
     data["tags"] = _loads(data.get("tags"), [])
-    data["audit"] = _load_dict(data.get("audit"))
     data["suspicious"] = bool(data.get("suspicious"))
     data["score"] = float(data.get("score") or 0)
     data["price"] = float(data.get("price") or 0)
@@ -188,8 +175,6 @@ def _row(item: dict) -> str:
     gpu = html.escape(item.get("gpu") or "")
     brand = html.escape(item.get("brand") or "")
     table_name = html.escape(item.get("table_name") or "")
-    audit = item.get("audit") or {}
-    audit_badge = '<span class="tag" style="background:#fef3c7;color:#92400e">商家</span>' if audit.get("merchant") else ""
     return f"""
 <tr data-title="{html.escape(item['title'].casefold(), quote=True)}" data-new="{1 if item.get('is_new') else 0}"
     data-score="{item['score']}" data-susp="{1 if item['suspicious'] else 0}">
@@ -198,7 +183,7 @@ def _row(item: dict) -> str:
     <a class="title" href="{html.escape(item['url'], quote=True)}" target="_blank" rel="noreferrer">{title}</a>
     <div class="sub">{f'<span class="tag">{gpu}</span>' if gpu else ''}{brand} · {tags}
       {html.escape(item.get('location') or '地区未知')} · {html.escape(item['age'])}
-      · {html.escape(item.get('seller') or '卖家未知')}{audit_badge}</div>
+      · {html.escape(item.get('seller') or '卖家未知')}</div>
     <div class="reason">{reasons}</div>
     {f'<div class="flag">{flags}</div>' if flags else ''}
   </td>
@@ -240,7 +225,7 @@ def render_html(
         )
     else:
         sections.append(
-            f'<section><h2>🎯 值得看</h2><div class="empty">{html.escape(empty_hint or "本轮没有符合条件的新商品。可以调低 scan.min_score，或放宽 market.target_factor。")}</div></section>'
+            f'<section><h2>🎯 值得看</h2><div class="empty">{html.escape(empty_hint or "本轮没有符合条件的新商品。可以调低 scan.min_score，或放宽 scan.min_gap。")}</div></section>'
         )
     if suspicious:
         sections.append(

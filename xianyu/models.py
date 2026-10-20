@@ -18,6 +18,7 @@ class Listing:
     tags: list[str] = field(default_factory=list)
     keyword: str = ""
     watch: str = ""
+    desc: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -33,6 +34,7 @@ class Listing:
             "tags": list(self.tags),
             "keyword": self.keyword,
             "watch": self.watch,
+            "desc": self.desc,
         }
 
 
@@ -47,7 +49,6 @@ class Analysis:
     spec_delta: float = 0.0
     suspicious: bool = False
     market_median: float = 0.0
-    samples: int = 0
     excluded: bool = False
     gpu: str = ""
     gpu_score: float = 0.0
@@ -55,3 +56,4 @@ class Analysis:
     brand_score: float = 0.0
     table_name: str = ""
     ref_source: str = ""
+    fatal: bool = False

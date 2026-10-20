@@ -44,23 +44,16 @@ def _as_str_list(value: Any, label: str) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
-@dataclass
-class SpecRule:
-    pattern: str
-    add: float
-    label: str = ""
+WATCH_KEYS = {"name", "keyword", "reference", "min_price", "max_price", "pages"}
 
-    def match(self, title: str) -> bool:
-        try:
-            import re
-
-            return re.search(self.pattern, title, re.IGNORECASE) is not None
-        except re.error:
-            return self.pattern.lower() in title.lower()
-
-    @property
-    def name(self) -> str:
-        return self.label or self.pattern
+DEFAULT_MERCHANT_REJECT = (
+    "空机",
+    "无内存", "没内存", "没有内存", "不含内存", "缺内存",
+    "无硬盘", "没硬盘", "没有硬盘", "不含硬盘", "缺硬盘",
+    "无固态", "没有固态", "不含固态",
+    "内存硬盘都没有", "内存硬盘全无", "内存硬盘均无",
+)
+DEFAULT_BOOT_REJECT = ("无法开机", "开不了机", "不能开机", "不开机", "点不亮")
 
 
 @dataclass
@@ -71,16 +64,6 @@ class Watch:
     min_price: float = 500
     max_price: float = 8000
     pages: int = 2
-    exclude: list[str] = field(default_factory=list)
-    location: str = ""
-    specs: list[SpecRule] = field(default_factory=list)
-
-    def excluded(self, title: str, extra: list[str]) -> str | None:
-        lowered = title.casefold()
-        for word in [*extra, *self.exclude]:
-            if word and word.casefold() in lowered:
-                return word
-        return None
 
 
 @dataclass
@@ -94,25 +77,6 @@ class BrowserConfig:
     max_delay: float = 7.0
     user_agent: str = ""
     require_login: bool = True
-
-
-@dataclass
-class MarketConfig:
-    mode: str = "blend"
-    blend_weight: float = 0.65
-    min_samples: int = 5
-    target_factor: float = 0.82
-    floor_factor: float = 0.45
-
-    def validate(self) -> None:
-        if self.mode not in {"auto", "config", "blend"}:
-            raise ConfigError("market.mode 只能是 auto / config / blend")
-        if not 0 < self.blend_weight <= 1:
-            raise ConfigError("market.blend_weight 必须在 0~1 之间")
-        if not 0 < self.floor_factor < self.target_factor < 1.5:
-            raise ConfigError("market 里必须满足 0 < floor_factor < target_factor")
-        if self.min_samples < 1:
-            raise ConfigError("market.min_samples 至少为 1")
 
 
 @dataclass
@@ -131,6 +95,8 @@ class Signals:
     merchant: list[str] = field(default_factory=list)
     bait: list[str] = field(default_factory=list)
     broken: list[str] = field(default_factory=list)
+    merchant_reject: list[str] = field(default_factory=lambda: list(DEFAULT_MERCHANT_REJECT))
+    boot_reject: list[str] = field(default_factory=lambda: list(DEFAULT_BOOT_REJECT))
 
 
 @dataclass
@@ -140,6 +106,7 @@ class ScanConfig:
     min_score: float = 55
     min_gap: float = 100
     top_n_markdown: int = 20
+    detail_limit: int = 20
 
 
 @dataclass
@@ -151,8 +118,6 @@ class CategoryConfig:
 class ScoringConfig:
     base: float = 20
     price_max: float = 40
-    merchant_penalty: float = -18
-    audited_merchant_penalty: float = -10
     wants_penalty_low: float = -4
     wants_penalty_high: float = -8
 
@@ -161,14 +126,6 @@ class ScoringConfig:
 class PriceTableConfig:
     path: Path
     source_xlsx: str = ""
-
-
-@dataclass
-class AuditConfig:
-    enabled: bool = True
-    max_items: int = 8
-    min_score: float = 50
-    scroll_times: int = 3
 
 
 @dataclass
@@ -187,7 +144,6 @@ class Config:
     path: Path
     root: Path
     browser: BrowserConfig
-    market: MarketConfig
     filters: Filters
     signals: Signals
     scan: ScanConfig
@@ -196,7 +152,6 @@ class Config:
     category: CategoryConfig = field(default_factory=CategoryConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     price_table: PriceTableConfig | None = None
-    audit: AuditConfig = field(default_factory=AuditConfig)
 
     @property
     def data_dir(self) -> Path:
@@ -248,16 +203,6 @@ class Config:
         if browser.max_delay < browser.min_delay:
             browser.max_delay = browser.min_delay
 
-        market_raw = raw.get("market") or {}
-        market = MarketConfig(
-            mode=str(market_raw.get("mode") or "blend").lower(),
-            blend_weight=_as_float(market_raw.get("blend_weight"), 0.65, "market.blend_weight"),
-            min_samples=_as_int(market_raw.get("min_samples"), 5, "market.min_samples", 1),
-            target_factor=_as_float(market_raw.get("target_factor"), 0.82, "market.target_factor"),
-            floor_factor=_as_float(market_raw.get("floor_factor"), 0.45, "market.floor_factor"),
-        )
-        market.validate()
-
         filters_raw = raw.get("filters") or {}
         filters = Filters(
             exclude=_as_str_list(filters_raw.get("exclude"), "filters.exclude"),
@@ -274,6 +219,14 @@ class Config:
             merchant=_as_str_list(signals_raw.get("merchant"), "signals.merchant"),
             bait=_as_str_list(signals_raw.get("bait"), "signals.bait"),
             broken=_as_str_list(signals_raw.get("broken"), "signals.broken"),
+            merchant_reject=(
+                _as_str_list(signals_raw.get("merchant_reject"), "signals.merchant_reject")
+                or list(DEFAULT_MERCHANT_REJECT)
+            ),
+            boot_reject=(
+                _as_str_list(signals_raw.get("boot_reject"), "signals.boot_reject")
+                or list(DEFAULT_BOOT_REJECT)
+            ),
         )
 
         scan_raw = raw.get("scan") or {}
@@ -283,6 +236,7 @@ class Config:
             min_score=_as_float(scan_raw.get("min_score"), 55, "scan.min_score"),
             min_gap=_as_float(scan_raw.get("min_gap"), 100, "scan.min_gap"),
             top_n_markdown=_as_int(scan_raw.get("top_n_markdown"), 20, "scan.top_n_markdown", 1),
+            detail_limit=_as_int(scan_raw.get("detail_limit"), 20, "scan.detail_limit", 0),
         )
 
         category_raw = raw.get("category") or {}
@@ -290,8 +244,7 @@ class Config:
             exclude=_as_str_list(category_raw.get("exclude"), "category.exclude")
             or [
                 "轻薄", "超极本", "商务本", "办公本", "学生本", "二合一", "平板",
-                "上网本", "全能本", "创作本", "设计本", "移动工作站", "工作站",
-                "台式机", "台式", "迷你主机", "一体机", "显示器",
+                "上网本", "全能本", "创作本", "设计本",
             ]
         )
 
@@ -299,10 +252,6 @@ class Config:
         scoring = ScoringConfig(
             base=_as_float(scoring_raw.get("base"), 20, "scoring.base"),
             price_max=_as_float(scoring_raw.get("price_max"), 40, "scoring.price_max"),
-            merchant_penalty=_as_float(scoring_raw.get("merchant_penalty"), -18, "scoring.merchant_penalty"),
-            audited_merchant_penalty=_as_float(
-                scoring_raw.get("audited_merchant_penalty"), -10, "scoring.audited_merchant_penalty"
-            ),
             wants_penalty_low=_as_float(scoring_raw.get("wants_penalty_low"), -4, "scoring.wants_penalty_low"),
             wants_penalty_high=_as_float(scoring_raw.get("wants_penalty_high"), -8, "scoring.wants_penalty_high"),
         )
@@ -312,14 +261,6 @@ class Config:
         if not table_path.is_absolute():
             table_path = root / table_path
         price_table = PriceTableConfig(path=table_path, source_xlsx=str(table_raw.get("source_xlsx") or ""))
-
-        audit_raw = raw.get("audit") or {}
-        audit = AuditConfig(
-            enabled=bool(audit_raw.get("enabled", True)),
-            max_items=_as_int(audit_raw.get("max_items"), 8, "audit.max_items", 0),
-            min_score=_as_float(audit_raw.get("min_score"), 50, "audit.min_score"),
-            scroll_times=_as_int(audit_raw.get("scroll_times"), 3, "audit.scroll_times", 1),
-        )
 
         notify_raw = raw.get("notify") or {}
         notify = NotifyConfig(
@@ -343,16 +284,11 @@ class Config:
             if name in names:
                 raise ConfigError(f"监控项名称重复：{name}")
             names.add(name)
-            specs: list[SpecRule] = []
-            for spec in item.get("specs") or []:
-                if not isinstance(spec, dict) or not spec.get("pattern"):
-                    raise ConfigError(f"{name} 的 specs 里有一项缺少 pattern")
-                specs.append(
-                    SpecRule(
-                        str(spec["pattern"]),
-                        _as_float(spec.get("add"), 0, f"{name}.specs.add"),
-                        str(spec.get("label") or "").strip(),
-                    )
+            unknown = sorted(set(item) - WATCH_KEYS)
+            if unknown:
+                raise ConfigError(
+                    f"{name} 有不认识的配置项 {unknown}；watch 只支持 "
+                    f"{sorted(WATCH_KEYS)}，写了也不会生效"
                 )
             watch = Watch(
                 name=name,
@@ -361,9 +297,6 @@ class Config:
                 min_price=_as_float(item.get("min_price"), filters.min_price, f"{name}.min_price"),
                 max_price=_as_float(item.get("max_price"), filters.max_price, f"{name}.max_price"),
                 pages=_as_int(item.get("pages"), scan.pages, f"{name}.pages", 1),
-                exclude=_as_str_list(item.get("exclude"), f"{name}.exclude"),
-                location=str(item.get("location") or "").strip(),
-                specs=specs,
             )
             if watch.max_price <= watch.min_price:
                 raise ConfigError(f"{name} 的 max_price 必须大于 min_price")
@@ -373,7 +306,6 @@ class Config:
             path=cfg_path,
             root=root,
             browser=browser,
-            market=market,
             filters=filters,
             signals=signals,
             scan=scan,
@@ -382,7 +314,6 @@ class Config:
             category=category,
             scoring=scoring,
             price_table=price_table,
-            audit=audit,
         )
 
     def ensure_dirs(self) -> None:

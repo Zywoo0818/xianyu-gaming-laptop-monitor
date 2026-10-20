@@ -32,13 +32,11 @@ CREATE TABLE IF NOT EXISTS listings (
     keyword       TEXT DEFAULT '',
     ref_price     REAL DEFAULT 0,
     market_median REAL DEFAULT 0,
-    samples       INTEGER DEFAULT 0,
     ratio         REAL DEFAULT 1,
     gpu           TEXT DEFAULT '',
     brand         TEXT DEFAULT '',
     table_name    TEXT DEFAULT '',
     ref_source    TEXT DEFAULT '',
-    audit         TEXT DEFAULT '{}',
     score         REAL DEFAULT 0,
     verdict       TEXT DEFAULT '',
     reasons       TEXT DEFAULT '[]',
@@ -63,27 +61,6 @@ CREATE TABLE IF NOT EXISTS scans (
     kept        INTEGER DEFAULT 0,
     error       TEXT DEFAULT ''
 );
-
-CREATE TABLE IF NOT EXISTS price_history (
-    watch   TEXT NOT NULL,
-    day     TEXT NOT NULL,
-    median  REAL NOT NULL,
-    samples INTEGER NOT NULL,
-    PRIMARY KEY (watch, day)
-);
-
-CREATE TABLE IF NOT EXISTS seller_audit (
-    nick        TEXT PRIMARY KEY,
-    user_id     TEXT DEFAULT '',
-    has_dji     INTEGER DEFAULT 0,
-    apple_hits  INTEGER DEFAULT 0,
-    merchant    INTEGER DEFAULT 0,
-    in_sale     INTEGER DEFAULT 0,
-    sold        INTEGER DEFAULT 0,
-    bio         TEXT DEFAULT '',
-    titles      TEXT DEFAULT '[]',
-    checked_at  TEXT NOT NULL
-);
 """
 
 
@@ -104,12 +81,10 @@ def connect(path: Path) -> sqlite3.Connection:
 def _migrate(conn: sqlite3.Connection) -> None:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(listings)")}
     additions = {
-        "samples": "INTEGER DEFAULT 0",
         "gpu": "TEXT DEFAULT ''",
         "brand": "TEXT DEFAULT ''",
         "table_name": "TEXT DEFAULT ''",
         "ref_source": "TEXT DEFAULT ''",
-        "audit": "TEXT DEFAULT '{}'",
     }
     changed = False
     for name, ddl in additions.items():
@@ -149,7 +124,6 @@ def upsert(
     listing: Listing,
     analysis: Analysis,
     scan_id: int,
-    audit: dict | None = None,
 ) -> bool:
     """写入或更新一条商品，返回是否为新出现的商品。"""
     existing = conn.execute(
@@ -170,13 +144,11 @@ def upsert(
         listing.keyword,
         analysis.ref_price,
         analysis.market_median,
-        analysis.samples,
         analysis.ratio,
         analysis.gpu,
         analysis.brand,
         analysis.table_name,
         analysis.ref_source,
-        json.dumps(audit or {}, ensure_ascii=False),
         analysis.score,
         analysis.verdict,
         json.dumps(analysis.reasons, ensure_ascii=False),
@@ -191,10 +163,10 @@ def upsert(
         """
         INSERT INTO listings (
             title, price, url, image, location, seller, publish_ts, wants, tags,
-            watch, keyword, ref_price, market_median, samples, ratio, gpu, brand,
-            table_name, ref_source, audit, score, verdict, reasons, flags, suspicious,
+            watch, keyword, ref_price, market_median, ratio, gpu, brand,
+            table_name, ref_source, score, verdict, reasons, flags, suspicious,
             first_seen, last_seen, last_scan_id, item_id
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(item_id) DO UPDATE SET
             title=excluded.title,
             price=excluded.price,
@@ -208,13 +180,11 @@ def upsert(
             keyword=excluded.keyword,
             ref_price=excluded.ref_price,
             market_median=excluded.market_median,
-            samples=excluded.samples,
             ratio=excluded.ratio,
             gpu=excluded.gpu,
             brand=excluded.brand,
             table_name=excluded.table_name,
             ref_source=excluded.ref_source,
-            audit=excluded.audit,
             score=excluded.score,
             verdict=excluded.verdict,
             reasons=excluded.reasons,
@@ -235,10 +205,44 @@ def commit(conn: sqlite3.Connection) -> None:
 def rows_for_scan(conn: sqlite3.Connection, scan_id: int) -> list[sqlite3.Row]:
     return list(
         conn.execute(
-            "SELECT * FROM listings WHERE last_scan_id=? ORDER BY suspicious ASC, score DESC, price ASC",
+            """
+            SELECT * FROM listings
+            WHERE last_scan_id=? AND status<>'ignored'
+            ORDER BY suspicious ASC, score DESC, price ASC
+            """,
             (scan_id,),
         )
     )
+
+
+def rows_ignored(conn: sqlite3.Connection, limit: int = 200) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            "SELECT * FROM listings WHERE status='ignored' ORDER BY last_seen DESC LIMIT ?",
+            (limit,),
+        )
+    )
+
+
+def ignored_ids(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(row["item_id"])
+        for row in conn.execute("SELECT item_id FROM listings WHERE status='ignored'")
+    }
+
+
+def ignore_pending(conn: sqlite3.Connection, reasons: dict[str, str]) -> int:
+    """只自动忽略仍在待审核的旧条目，不覆盖人工处理过的状态。"""
+    changed = 0
+    for item_id, reason in reasons.items():
+        cursor = conn.execute(
+            "UPDATE listings SET status='ignored', note=? WHERE item_id=? AND status='pending'",
+            (f"自动忽略：{reason}", item_id),
+        )
+        changed += cursor.rowcount
+    if changed:
+        conn.commit()
+    return changed
 
 
 def rows_pending(conn: sqlite3.Connection, limit: int = 300) -> list[sqlite3.Row]:
@@ -309,62 +313,3 @@ def set_status(conn: sqlite3.Connection, item_id: str, status: str, note: str | 
 def count_by_status(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute("SELECT status, COUNT(*) AS n FROM listings GROUP BY status")
     return {row["status"]: row["n"] for row in rows}
-
-
-def save_median(conn: sqlite3.Connection, watch: str, median: float, samples: int) -> None:
-    if median <= 0 or samples <= 0:
-        return
-    conn.execute(
-        "INSERT OR REPLACE INTO price_history (watch, day, median, samples) VALUES (?,?,?,?)",
-        (watch, datetime.now().strftime("%Y-%m-%d"), median, samples),
-    )
-    conn.commit()
-
-
-def get_seller_audit(conn: sqlite3.Connection, nick: str, max_age_hours: float = 168) -> dict | None:
-    row = conn.execute("SELECT * FROM seller_audit WHERE nick=?", (nick,)).fetchone()
-    if row is None:
-        return None
-    try:
-        age = (datetime.now() - datetime.strptime(row["checked_at"], "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
-    except (TypeError, ValueError):
-        return None
-    if age > max_age_hours:
-        return None
-    return {
-        "user_id": row["user_id"],
-        "has_dji": bool(row["has_dji"]),
-        "apple_hits": row["apple_hits"],
-        "merchant": bool(row["merchant"]),
-        "in_sale": row["in_sale"],
-        "sold": row["sold"],
-        "bio": row["bio"],
-        "titles": json.loads(row["titles"] or "[]"),
-        "cached": True,
-    }
-
-
-def save_seller_audit(conn: sqlite3.Connection, nick: str, data: dict) -> None:
-    conn.execute(
-        """
-        INSERT INTO seller_audit (nick, user_id, has_dji, apple_hits, merchant, in_sale, sold, bio, titles, checked_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(nick) DO UPDATE SET
-            user_id=excluded.user_id, has_dji=excluded.has_dji, apple_hits=excluded.apple_hits,
-            merchant=excluded.merchant, in_sale=excluded.in_sale, sold=excluded.sold,
-            bio=excluded.bio, titles=excluded.titles, checked_at=excluded.checked_at
-        """,
-        (
-            nick,
-            str(data.get("user_id") or ""),
-            1 if data.get("has_dji") else 0,
-            int(data.get("apple_hits") or 0),
-            1 if data.get("merchant") else 0,
-            int(data.get("in_sale") or 0),
-            int(data.get("sold") or 0),
-            str(data.get("bio") or "")[:500],
-            json.dumps(data.get("titles") or [], ensure_ascii=False)[:4000],
-            now_text(),
-        ),
-    )
-    conn.commit()

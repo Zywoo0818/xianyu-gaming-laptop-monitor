@@ -86,7 +86,7 @@ def cmd_scan(args) -> int:
         return 2
     except Exception as exc:  # noqa: BLE001
         _say(f"✗ 抓取失败：{type(exc).__name__}: {exc}")
-        _say("  如果提示 WinError 5 / 管道错误，请在普通 PowerShell 窗口里手动运行 run_scan.bat。")
+        _say("  如果提示 WinError 5 / 管道错误，请手动双击 scan.bat 再跑一次。")
         return 1
 
     _say("")
@@ -110,7 +110,7 @@ def cmd_scan(args) -> int:
             _say(f"   {item['url']}")
     else:
         _say("")
-        _say("本轮没有达到分数的商品。可以调低 scan.min_score，或放宽 market.target_factor。")
+        _say("本轮没有达到分数的商品。可以调低 scan.min_score，或放宽 scan.min_gap。")
 
     _say("")
     _say(f"报表：{outcome.paths['html']}")
@@ -146,7 +146,7 @@ def cmd_report(args) -> int:
     conn.close()
     stats = {
         "fetched": scan["fetched"] or 0,
-        "kept": scan["kept"] or 0,
+        "kept": len(items),
         "watches": scan["watches"] or 0,
         "elapsed": 0,
         "top_n": cfg.scan.top_n_markdown,
@@ -233,7 +233,7 @@ def cmd_import_prices(args) -> int:
     source = Path(args.xlsx) if args.xlsx else Path(cfg.price_table.source_xlsx)
     if not source.is_file():
         _say(f"✗ 找不到行情表：{source}")
-        _say("  用法：python -m xianyu import-prices \"E:\\useful\\文件\\笔电行情.xlsx\"")
+        _say("  用法：python -m xianyu import-prices \"笔电行情.xlsx\"")
         return 1
     rows = build_table(source)
     if not rows:
