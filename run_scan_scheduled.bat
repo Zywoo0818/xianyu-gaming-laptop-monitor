@@ -14,6 +14,9 @@ set "PYTHONIOENCODING=utf-8"
 
 if not exist "logs" mkdir "logs"
 
-rem scheduled task only: hidden, no pause, append to log
-%PY% -m xianyu scan --no-notify %* >> "logs\scan.log" 2>&1
+rem optional scheduled task only: hidden, no pause, append to daily log
+rem daily use: run scan.bat manually
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') do set "TODAY=%%i"
+if not defined TODAY set "TODAY=unknown"
+%PY% -m xianyu scan %* >> "logs\scan-%TODAY%.log" 2>&1
 exit /b %ERRORLEVEL%

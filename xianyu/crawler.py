@@ -160,6 +160,7 @@ class Crawler:
         self._pw = None
         self._ctx: BrowserContext | None = None
         self._captures: list[tuple[int, dict]] = []
+        self.stats = {"search_requests": 0, "detail_requests": 0}
 
     # ---------------------------------------------------------------- lifecycle
     def __enter__(self) -> "Crawler":
@@ -230,6 +231,7 @@ class Crawler:
         except (ValueError, UnicodeDecodeError):
             return
         page_number = _page_number_from_request(route.request)
+        self.stats["search_requests"] += 1
         self._captures.append((page_number, payload))
 
     def _wait_capture(self, page_number: int, page: Page | None = None, timeout_ms: int = CAPTURE_TIMEOUT_MS) -> dict:
@@ -396,8 +398,9 @@ class Crawler:
     def fetch_details(self, listings: list[Listing]) -> dict[str, str]:
         """逐条打开详情页，取描述正文；失败只跳过当前条目。
 
-        描述元素大约 10–15 秒才渲染出来，用 wait_for_function 等正文出现，
-        比固定 sleep 稳。登录/风控直接向上抛，由调用方中止详情阶段。
+        返回 item_id -> 描述，空字符串表示页面正常打开但没有描述（同样算抓过，
+        以后不再重复请求）。描述元素大约 10–15 秒才渲染出来，用 wait_for_function
+        等正文出现，比固定 sleep 稳。登录/风控直接向上抛，由调用方中止详情阶段。
         """
         if not listings:
             return {}
@@ -410,6 +413,7 @@ class Crawler:
             for index, listing in enumerate(listings, start=1):
                 self.log(f"  详情 {index}/{total}：{listing.title[:30]}")
                 try:
+                    self.stats["detail_requests"] += 1
                     page.goto(listing.url, wait_until="domcontentloaded")
                     self._check_page_state(page)
                     page.wait_for_function(
@@ -429,10 +433,9 @@ class Crawler:
                         }""",
                         DETAIL_DESC_SELECTOR,
                     )
-                    if text:
-                        found[listing.item_id] = text
-                    else:
-                        self.log(f"  ! 详情 {index}/{total} 没有描述正文，跳过")
+                    found[listing.item_id] = text
+                    if not text:
+                        self.log(f"  ! 详情 {index}/{total} 没有描述正文，记为已抓取")
                 except PWTimeout:
                     self._check_page_state(page)
                     self.log(f"  ! 详情 {index}/{total} 等待描述超时，跳过")

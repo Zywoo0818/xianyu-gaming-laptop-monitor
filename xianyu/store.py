@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS listings (
     suspicious    INTEGER DEFAULT 0,
     status        TEXT NOT NULL DEFAULT 'pending',
     note          TEXT DEFAULT '',
+    notified_at   TEXT DEFAULT '',
     first_seen    TEXT NOT NULL,
     last_seen     TEXT NOT NULL,
     last_scan_id  INTEGER
@@ -60,6 +61,12 @@ CREATE TABLE IF NOT EXISTS scans (
     fetched     INTEGER DEFAULT 0,
     kept        INTEGER DEFAULT 0,
     error       TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS listing_details (
+    item_id    TEXT PRIMARY KEY,
+    desc       TEXT NOT NULL DEFAULT '',
+    fetched_at TEXT NOT NULL
 );
 """
 
@@ -85,12 +92,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "brand": "TEXT DEFAULT ''",
         "table_name": "TEXT DEFAULT ''",
         "ref_source": "TEXT DEFAULT ''",
+        "notified_at": "TEXT DEFAULT ''",
     }
     changed = False
     for name, ddl in additions.items():
         if name not in columns:
             conn.execute(f"ALTER TABLE listings ADD COLUMN {name} {ddl}")
             changed = True
+            if name == "notified_at":
+                # 老库升级时不补发历史商品：已有的都当作“已通知过”。
+                conn.execute("UPDATE listings SET notified_at=last_seen")
     if changed:
         conn.commit()
 
@@ -231,6 +242,33 @@ def ignored_ids(conn: sqlite3.Connection) -> set[str]:
     }
 
 
+def load_detail_cache(conn: sqlite3.Connection) -> tuple[dict[str, str], set[str]]:
+    """返回 (item_id -> 已缓存描述, 不需要再抓详情的 item_id)。"""
+    details = {
+        str(row["item_id"]): str(row["desc"] or "")
+        for row in conn.execute("SELECT item_id, desc FROM listing_details")
+    }
+    skip_ids = set(details)
+    for row in conn.execute("SELECT item_id FROM listings WHERE status<>'pending'"):
+        skip_ids.add(str(row["item_id"]))
+    return details, skip_ids
+
+
+def save_details(conn: sqlite3.Connection, details: dict[str, str]) -> int:
+    if not details:
+        return 0
+    stamp = now_text()
+    conn.executemany(
+        """
+        INSERT INTO listing_details (item_id, desc, fetched_at) VALUES (?,?,?)
+        ON CONFLICT(item_id) DO UPDATE SET desc=excluded.desc, fetched_at=excluded.fetched_at
+        """,
+        [(item_id, desc, stamp) for item_id, desc in details.items()],
+    )
+    conn.commit()
+    return len(details)
+
+
 def ignore_pending(conn: sqlite3.Connection, reasons: dict[str, str]) -> int:
     """只自动忽略仍在待审核的旧条目，不覆盖人工处理过的状态。"""
     changed = 0
@@ -256,6 +294,33 @@ def rows_pending(conn: sqlite3.Connection, limit: int = 300) -> list[sqlite3.Row
             (limit,),
         )
     )
+
+
+def pending_notify(conn: sqlite3.Connection, min_score: float, limit: int = 50) -> list[sqlite3.Row]:
+    """待推送队列：分数够、未被忽略、还没成功推送过的商品。"""
+    return list(
+        conn.execute(
+            """
+            SELECT * FROM listings
+            WHERE (notified_at IS NULL OR notified_at='')
+              AND status='pending' AND suspicious=0 AND score>=?
+            ORDER BY score DESC, price ASC LIMIT ?
+            """,
+            (min_score, limit),
+        )
+    )
+
+
+def mark_notified(conn: sqlite3.Connection, item_ids: set[str] | list[str]) -> int:
+    if not item_ids:
+        return 0
+    stamp = now_text()
+    conn.executemany(
+        "UPDATE listings SET notified_at=? WHERE item_id=?",
+        [(stamp, item_id) for item_id in item_ids],
+    )
+    conn.commit()
+    return len(item_ids)
 
 
 def rows_suspicious(conn: sqlite3.Connection, limit: int = 100) -> list[sqlite3.Row]:

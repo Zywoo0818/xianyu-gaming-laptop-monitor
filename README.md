@@ -2,8 +2,10 @@
 
 按你的要求重做的版本：**只做游戏本、只认 N 卡、拿你自己的《笔电行情》表当参考价，低于表价 100 以上才看**。
 
-它只抓搜索列表；对初筛候选（通常 3–10 条）再打开详情页读描述做细筛，不逐条爬 200+ 商品、不聊卖家、不下单——只负责“找出来 + 排好序 + 给链接”，剩下的你人工判断。
+它只抓搜索列表；对初筛候选（每轮最多 5 条）再打开详情页读描述做细筛，不逐条爬 200+ 商品、不聊卖家、不下单——只负责“找出来 + 排好序 + 给链接”，剩下的你人工判断。
 
+> **v2.3.0 新增**：熔断拆成搜索风控 / 详情风控 / 软失败三套计数，部分成功不再清零；冷却 24 小时起步、重复触发翻倍，重新登录只保留最短冷静期；登录只校验 cookie、不再自动试搜；手动与定时扫描互斥；日志按天切分并记录请求数、风控次数和耗时。
+>
 > **本版变更**：已删除卖家主页审核模块（原“大疆/无人机 → 骗子排除、苹果设备计数、主页商家确认”）。
 > 现在只靠标题/昵称做商家硬排除，**不再自动识别骗子**，低价异常请自行核实。
 
@@ -17,7 +19,7 @@
   → ② 品类闸门：苹果、华为、轻薄本、工作站、台式显卡、无 N 卡 全部丢掉
   → ③ 行情表比价：按「型号 + 显卡」匹配你表格里的收机价
   → ④ 价差底线：比表价低不到 100 的直接不看
-  → ⑤ 初筛候选抓详情页描述，再按硬规则复筛（默认最多 20 条）
+  → ⑤ 初筛候选抓详情页描述，再按硬规则复筛（默认最多 5 条，抓过的缓存复用）
   → ⑥ 打分排序：价差深度 + 显卡档位 + 品牌权重 + 新鲜度 - 想要人数
   → ⑦ 输出 links：reports/latest.html（可点）+ CSV + Markdown
 ```
@@ -44,6 +46,8 @@ report.bat                                                       :: 4. 看报表
 ```
 
 四个 bat 都会自动找 Python：优先 `.venv`，没有就用 `py -3` / `python`。表格改了以后重新执行第 2 步即可，不用改代码。
+
+> `login.bat` 扫码后只校验并保存登录 cookie，**不会立刻发起搜索**；第一次扫描请手动运行 `scan.bat`。
 
 > `笔电行情.xlsx` 含个人收机价，默认被 `.gitignore` 排除，不会上传仓库。克隆项目后请自备行情表，按第 2 步导入。
 
@@ -78,7 +82,7 @@ report.bat                                                       :: 4. 看报表
 - 能力值：`最大支持 32G`、`可升级到 16G`；`已升级到 16G` / `已加装 1T` 按实际容量算
 - `黑屏` / `花屏` 不硬排除，仍按故障描述扣分，并在审核页打上「异常低价」标签待核实
 
-详情页只给**初筛候选**抓，默认最多 `scan.detail_limit: 20` 条，不会逐条打开 200+ 商品。旧待审核商品只有在下一次扫描仍出现、且命中硬规则时才会自动移入「已忽略」。
+详情页只给**初筛候选**抓，默认每轮最多 `scan.detail_limit: 5` 条，不会逐条打开 200+ 商品。只有整轮搜索没有任何错误时才抓详情；抓过的描述存入数据库复用，已联系/已成交/已忽略的商品不再重复打开。旧待审核商品只有在下一次扫描仍出现、且命中硬规则时才会自动移入「已忽略」。
 
 ### 2. 品牌权重
 
@@ -167,15 +171,52 @@ review.bat            :: http://127.0.0.1:8765
 
 ---
 
-## 定时任务
+## 推送（可选）
+
+在 `config.yaml` 填企业微信群机器人或 Bark 地址即可；不填就完全不发。
+
+```yaml
+notify:
+  wecom_webhook: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
+  bark_url: "https://api.day.app/你的key"
+  min_score: 75
+```
+
+- 只推「不异常」且分数 ≥ `notify.min_score` 的商品；
+- 每条商品只成功推一次：企业微信一轮最多 8 条、Bark 最多 5 条，超出部分下一轮补发；
+- 发送失败不会写入已推送标记，下次扫描自动重试；
+- 手动扫描和可选定时任务都会推送。
+
+---
+
+## 运行方式（手动为主）
+
+日常需要看货时手动跑：
+
+```bat
+scan.bat
+```
+
+**不建议长期挂定时任务**：闲鱼风控看的是请求频率，自动轮询只会让账号更早被要求验证。确实需要兜底时再注册，脚本默认 60 分钟：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\register_task.ps1            # 每 20 分钟
-powershell -ExecutionPolicy Bypass -File .\register_task.ps1 -Minutes 30
+powershell -ExecutionPolicy Bypass -File .\register_task.ps1            # 每 60 分钟（可选）
+powershell -ExecutionPolicy Bypass -File .\register_task.ps1 -Minutes 90
 powershell -ExecutionPolicy Bypass -File .\register_task.ps1 -Unregister
 ```
 
-日志在 `logs\scan.log`。**间隔别低于 15 分钟**，闲鱼对高频搜索有风控。
+日志按天写在 `logs\scan-YYYY-MM-DD.log`，每轮记录状态、搜索/详情请求数、搜索风控/详情风控/软失败次数和耗时。手动扫描与定时任务共用一把跨进程锁，后启动的一轮会直接跳过，不会重叠请求。
+
+间隔低于 30 分钟会明显增加风控概率。
+
+### 遇到风控
+
+- 任意一轮搜索**首次**遇到风控，本轮立即停止，不再跑剩余关键词，也不会自动切有头模式重试；
+- 按终端提示用 `scan.bat --headed` 手动过验证、检查登录，确认页面正常后再重新运行；
+- 不要连续重试。搜索风控、详情风控、软失败（0 条结果、超时、未知接口错误）**分别计数**，各自连续 `failure_threshold` / `detail_failure_threshold` / `soft_failure_threshold` 轮（默认都是 3）后进入冷却；
+- 冷却从 24 小时起步，重复触发逐次翻倍，风控上限 7 天；软失败从 1 小时起步，上限 24 小时；
+- **部分成功不清零**：只有一整轮所有关键词都跑完、没有任何错误、且至少拿到一条结果，才把三套计数和冷却等级全部清零；
+- 熔断后重新 `login.bat` 扫码**不会立即解除**：剩余冷却最多缩短到“登录后 `login_quiet_minutes`（默认 60 分钟）”，计数不会清零；`scan.bat --force` 可强跑一次，但不会绕过计数。
 
 ---
 
@@ -215,7 +256,20 @@ powershell -ExecutionPolicy Bypass -File .\register_task.ps1 -Unregister
 scan:
   min_gap: 100      # 低于表价多少才看
   min_score: 55     # 进报表的最低分
-  detail_limit: 20  # 只给初筛候选抓详情描述，最多 N 条；0 = 关闭
+  detail_limit: 5   # 每轮最多抓 N 条详情；抓过的会缓存；0 = 关闭
+  failure_threshold: 3           # 连续 N 轮搜索风控后熔断；0 = 关闭
+  detail_failure_threshold: 3    # 连续 N 轮详情风控后熔断；0 = 关闭
+  soft_failure_threshold: 3      # 连续 N 轮 0 结果/超时/未知错误后熔断；0 = 关闭
+  cooldown_minutes: 1440         # 风控冷却起步 24 小时，重复触发翻倍
+  cooldown_max_minutes: 10080    # 风控冷却上限 7 天
+  soft_cooldown_minutes: 60      # 软失败冷却起步 1 小时
+  soft_cooldown_max_minutes: 1440 # 软失败冷却上限 24 小时
+  login_quiet_minutes: 60        # 熔断后重新登录的最短冷静期
+
+notify:
+  wecom_webhook: "" # 企业微信群机器人地址
+  bark_url: ""      # Bark 推送地址
+  min_score: 75     # 推送分数线
 
 watches:            # 搜索词，按显卡档位搜
   - name: 游戏本 3060
@@ -236,7 +290,7 @@ watches:            # 搜索词，按显卡档位搜
 先看终端打印的「排除原因」：如果是“比行情表还高”，说明现在挂牌价普遍高于你的收机价，这很正常；如果是“看不出是笔记本”，说明标题太简略，可以往 `watches` 里加具体型号词。
 
 **提示 RGV587 / 抓不到**
-风控。停 30~60 分钟；`scan.bat --headed` 看浏览器在做什么；或重新 `login.bat`。
+风控。脚本会立即停止本轮，不再继续请求；先用 `scan.bat --headed` 手动过验证并确认登录态，等一段时间再跑，不要连续重试。搜索风控、详情风控和软失败分别计数，连续 3 轮触发后自动冷却（风控 24 小时起步、逐次翻倍；软失败 1 小时起）。一整轮完全干净才会清零；重新登录不会立即解除，剩余冷却最多缩短到登录后 60 分钟；`scan.bat --force` 可强跑一次。
 
 **页面显示“非法访问”**
 脚本已自动伪装 UA；仍出现就 `--headed`，或在 `config.yaml` 填 `browser.user_agent`。
@@ -245,7 +299,7 @@ watches:            # 搜索词，按显卡档位搜
 
 ## 版本与回退
 
-当前版本 `v2.0.0`，上一版 `v1.0.0`。每个版本对应一个 git tag，任何时候都能退回。
+当前版本 `v2.3.0`，上一版 `v2.2.0`。每个版本对应一个 git tag，任何时候都能退回。
 
 ```bash
 git tag                    # 看所有版本
@@ -273,7 +327,7 @@ git push --force-with-lease origin main
 
 ## 合规
 
-- 仅供个人选品比价，控制频率（≥15 分钟一次）；
+- 仅供个人选品比价，按需手动运行；如用定时任务，间隔建议 ≥30 分钟；
 - 不绕过验证码、不破解签名；
 - **不打开卖家主页**，只读搜索接口返回的公开列表，以及初筛候选详情页的公开文字；
 - 交易走平台，别被“加微信私下交易”带走。
@@ -285,6 +339,9 @@ git push --force-with-lease origin main
 - Python 3.12 + Playwright 1.64，复用本机 Chrome；
 - 抓的是 `mtop.taobao.idlemtopsearch.pc.search`，登录态由真实浏览器发出，脚本只旁路读 JSON；
 - 无头模式会自动替换 `HeadlessChrome` UA，否则闲鱼直接返回“非法访问”；
-- 数据落在 `data\xianyu.db`（SQLite），审核状态在同一个库里。
+- 数据落在 `data\xianyu.db`（SQLite），审核状态、推送记录和详情描述缓存都在同一个库里；
+- 风控熔断状态在 `data\risk_guard.json`，删除该文件可重置（冷却期内不建议手动删）；
+- 扫描锁是 `data\scan.lock` 上的系统文件锁，进程退出或崩溃后自动释放；
+- 每日日志在 `logs\scan-YYYY-MM-DD.log`。
 
 参考的开源项目：[LENKIN233/xianyu-monitor-skill](https://github.com/LENKIN233/xianyu-monitor-skill)、[cnfug/ai-goofish-monitor](https://github.com/cnfug/ai-goofish-monitor)。

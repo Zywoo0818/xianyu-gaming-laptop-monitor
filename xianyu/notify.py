@@ -1,33 +1,48 @@
-"""可选推送：企业微信群机器人 / Bark。不配置就完全不发。"""
+"""可选推送：企业微信群机器人 / Bark。不配置就完全不发。
+
+推送按“至少一次”处理：只有成功发出的条目才会记入 listings.notified_at，
+发送失败的下次扫描还会在待推送队列里重试，不会重复轰炸已经发过的商品。
+"""
 from __future__ import annotations
 
 import json
-import urllib.parse
 import urllib.request
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from .config import Config
 from .report import money
 
+WECOM_LIMIT = 8
+BARK_LIMIT = 5
+
+Sender = Callable[[str, dict[str, Any]], tuple[bool, str]]
+
+
+@dataclass
+class NotifyResult:
+    messages: list[str] = field(default_factory=list)
+    sent_ids: set[str] = field(default_factory=set)
+
 
 def _post_json(url: str, payload: dict[str, Any], timeout: int = 15) -> tuple[bool, str]:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json; charset=utf-8"},
-    )
     try:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             text = response.read().decode("utf-8", "replace")
         return True, text[:200]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - 推送失败只记录，不影响扫描
         return False, str(exc)[:200]
 
 
 def _wecom_payload(items: list[dict], title: str) -> dict[str, Any]:
     lines = [f"### {title}"]
-    for item in items[:8]:
+    for item in items[:WECOM_LIMIT]:
         lines.append(
             f"- [{item['title'][:38]}]({item['url']})\n"
             f"  <font color=\"info\">{money(item['price'])}</font>"
@@ -40,28 +55,45 @@ def _wecom_payload(items: list[dict], title: str) -> dict[str, Any]:
     return {"msgtype": "markdown", "markdown": {"content": content}}
 
 
-def push(cfg: Config, items: list[dict], title: str = "闲鱼低价提醒") -> list[str]:
+def push(
+    cfg: Config,
+    items: list[dict],
+    title: str = "闲鱼低价提醒",
+    *,
+    sender: Sender | None = None,
+) -> NotifyResult:
+    result = NotifyResult()
     if not cfg.notify.enabled:
-        return []
+        return result
     selected = [
         item
         for item in items
-        if not item["suspicious"] and item["score"] >= cfg.notify.min_score
+        if not item["suspicious"]
+        and item["score"] >= cfg.notify.min_score
+        and not item.get("notified_at")
     ]
     if not selected:
-        return ["没有达到推送分数线的商品，跳过推送"]
-    messages: list[str] = []
+        result.messages.append("没有达到推送分数线的新商品，跳过推送")
+        return result
+
+    send = sender or _post_json
     if cfg.notify.wecom_webhook:
-        ok, detail = _post_json(cfg.notify.wecom_webhook, _wecom_payload(selected, title))
-        messages.append(("企业微信推送成功" if ok else f"企业微信推送失败：{detail}"))
+        batch = selected[:WECOM_LIMIT]
+        ok, detail = send(cfg.notify.wecom_webhook, _wecom_payload(selected, title))
+        result.messages.append("企业微信推送成功" if ok else f"企业微信推送失败：{detail}")
+        if ok:
+            result.sent_ids.update(str(item["item_id"]) for item in batch)
     if cfg.notify.bark_url:
+        batch = selected[:BARK_LIMIT]
         text = "\n".join(
             f"{item['title'][:30]} {money(item['price'])}（{item['score']:.0f}分）\n{item['url']}"
-            for item in selected[:5]
+            for item in batch
         )
-        ok, detail = _post_json(
+        ok, detail = send(
             cfg.notify.bark_url.rstrip("/"),
             {"title": f"{title} · {len(selected)} 条", "body": text, "group": "闲鱼"},
         )
-        messages.append("Bark 推送成功" if ok else f"Bark 推送失败：{detail}")
-    return messages
+        result.messages.append("Bark 推送成功" if ok else f"Bark 推送失败：{detail}")
+        if ok:
+            result.sent_ids.update(str(item["item_id"]) for item in batch)
+    return result

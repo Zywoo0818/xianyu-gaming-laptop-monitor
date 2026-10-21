@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -16,18 +18,36 @@ except (AttributeError, ValueError):
     pass
 
 from xianyu import brands, gpus  # noqa: E402
-from xianyu.config import Config, ConfigError  # noqa: E402
+from xianyu.config import Config, ConfigError, NotifyConfig, PriceTableConfig  # noqa: E402
+from xianyu.crawler import RiskControl  # noqa: E402
+from xianyu.engine import (  # noqa: E402
+    ScanPaused,
+    _enrich_details,
+    can_fetch_details,
+    classify_round,
+    collect_live,
+    run_scan,
+    should_retry_headful,
+)
+from xianyu.guard import RiskGuard, classify_errors, is_risk_error  # noqa: E402
+from xianyu.lock import ScanBusy, ScanLock  # noqa: E402
 from xianyu.models import Listing  # noqa: E402
+from xianyu.notify import WECOM_LIMIT, push  # noqa: E402
 from xianyu.parse import parse_item, parse_payload  # noqa: E402
 from xianyu.pricetable import PriceRow, load_table, match_reference, normalize_name  # noqa: E402
 from xianyu.pricing import REJECT_BLOCKED_TAILS, analyze, gate, passes_filters  # noqa: E402
 from xianyu.report import render_html, row_to_item  # noqa: E402
 from xianyu.review import _page  # noqa: E402
+from xianyu.scanlog import log_scan  # noqa: E402
 from xianyu.store import (  # noqa: E402
     connect,
     ignore_pending,
+    load_detail_cache,
+    mark_notified,
+    pending_notify,
     rows_for_scan,
     rows_ignored,
+    save_details,
     set_status,
     start_scan,
     upsert,
@@ -289,13 +309,543 @@ def test_negation() -> None:
     )
 
 
+def test_notify_dedup() -> None:
+    print("notify")
+    tmp = ROOT / "data" / "_selftest_notify"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    conn = None
+    try:
+        db = tmp / "notify.db"
+        conn = connect(db)
+        scan_id = start_scan(conn, 1)
+        watch = CFG.watches[0]
+        now = int(time.time() * 1000)
+
+        def seed(item_id: str, title: str, price: float) -> None:
+            listing = Listing(item_id, title, price, "u")
+            listing.watch = watch.name
+            listing.publish_ts = now
+            upsert(conn, listing, analyze(listing, watch, FIXTURE_ROWS, CFG, now), scan_id)
+
+        for index in range(1, 11):
+            seed(
+                str(3000 + index),
+                f"联想拯救者R9000P 2021 RTX3060 16G 512G 个人自用 第{index}台",
+                3300,
+            )
+        cfg = replace(
+            CFG,
+            notify=NotifyConfig(
+                wecom_webhook="https://example.invalid/wecom",
+                bark_url="",
+                min_score=0,
+            ),
+        )
+        calls: list[dict] = []
+
+        def ok_sender(_url: str, payload: dict) -> tuple[bool, str]:
+            calls.append(payload)
+            return True, "ok"
+
+        queue = [row_to_item(row, now) for row in pending_notify(conn, 0)]
+        check(len(queue) == 10, "待推送队列包含 10 条")
+        first = push(cfg, queue, sender=ok_sender)
+        check(len(calls) == 1, "只配置企业微信时只发一次")
+        check(len(first.sent_ids) == WECOM_LIMIT, "企业微信单次最多 8 条")
+        mark_notified(conn, first.sent_ids)
+        check(len(pending_notify(conn, 0)) == 2, "没进推送条目的商品留到下次")
+
+        remaining = [row_to_item(row, now) for row in pending_notify(conn, 0)]
+        second = push(cfg, remaining, sender=ok_sender)
+        check(second.sent_ids == {item["item_id"] for item in remaining}, "第二次只补发剩余条目")
+        mark_notified(conn, second.sent_ids)
+        check(pending_notify(conn, 0) == [], "全部发完后队列清空")
+
+        seed("3001", "联想拯救者R9000P 2021 RTX3060 16G 512G 个人自用 第1台", 3300)
+        check(pending_notify(conn, 0) == [], "重新扫描 upsert 不会重置已推送标记")
+        again = push(cfg, [row_to_item(row, now) for row in pending_notify(conn, 0)], sender=ok_sender)
+        check(again.sent_ids == set() and "新商品" in again.messages[0], "已推送商品不会重复发送")
+
+        seed("3011", "联想拯救者R9000P 2021 RTX3060 16G 512G 个人自用 补货", 3300)
+
+        def fail_sender(_url: str, _payload: dict) -> tuple[bool, str]:
+            return False, "timeout"
+
+        failed = push(
+            cfg,
+            [row_to_item(row, now) for row in pending_notify(conn, 0)],
+            sender=fail_sender,
+        )
+        check(failed.sent_ids == set(), "发送失败不标记已推送")
+        check(len(pending_notify(conn, 0)) == 1, "失败条目留在队列里等下次重试")
+        retried = push(
+            cfg,
+            [row_to_item(row, now) for row in pending_notify(conn, 0)],
+            sender=ok_sender,
+        )
+        check(len(retried.sent_ids) == 1, "下次扫描可以重试成功")
+        mark_notified(conn, retried.sent_ids)
+
+        seed("3012", "联想拯救者R9000P RTX3060 16G 定金 500 先到先得", 2000)
+        seed("3013", "联想拯救者R9000P 2021 RTX3060 16G 512G 个人自用 已忽略", 3300)
+        set_status(conn, "3013", "ignored")
+        check(pending_notify(conn, 0) == [], "异常商品和已忽略商品不进入推送队列")
+
+        disabled = push(replace(cfg, notify=NotifyConfig()), [], sender=ok_sender)
+        check(disabled.messages == [] and disabled.sent_ids == set(), "没配置推送地址时完全静默")
+    finally:
+        if conn is not None:
+            conn.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_risk_guard() -> None:
+    print("risk guard")
+    tmp = ROOT / "data" / "_selftest_guard"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        cfg = replace(
+            CFG,
+            root=tmp,
+            scan=replace(
+                CFG.scan,
+                failure_threshold=2,
+                detail_failure_threshold=2,
+                soft_failure_threshold=2,
+                cooldown_minutes=60,
+                cooldown_max_minutes=240,
+                soft_cooldown_minutes=10,
+                soft_cooldown_max_minutes=30,
+                login_quiet_minutes=5,
+            ),
+        )
+        guard = RiskGuard(cfg)
+        messages: list[str] = []
+        state_path = tmp / "data" / "risk_guard.json"
+
+        check(
+            is_risk_error("风控：触发人机验证") and not is_risk_error("等待第 1 页搜索结果超时"),
+            "只把风控类错误算进熔断",
+        )
+        groups = classify_errors(
+            {
+                "w1": "风控：人机验证",
+                "详情": "详情风控：验证",
+                "w2": "等待第 1 页搜索结果超时",
+                "w3": "需要登录：未登录",
+                "w4": "接口拒绝：未知惩罚码",
+            }
+        )
+        check(groups["search_risk"] == ["风控：人机验证"], "搜索风控单独归类")
+        check(groups["detail_risk"] == ["详情风控：验证"], "详情风控单独归类")
+        check(len(groups["soft"]) == 2, "超时和未知惩罚码归入软失败")
+
+        check(not guard.should_skip()[0], "初始状态不拦截")
+        guard.observe(
+            clean=False, search_errors=["风控：第一次"], logger=messages.append
+        )
+        guard.observe(
+            clean=False, soft_errors=["等待第 1 页搜索结果超时"], logger=messages.append
+        )
+        guard.observe(
+            clean=False, detail_errors=["详情风控：详情验证"], logger=messages.append
+        )
+        state = guard.status()
+        check(
+            state["search_failures"] == 1
+            and state["soft_failures"] == 1
+            and state["detail_failures"] == 1,
+            "搜索/详情/软失败分别计数",
+        )
+        check(state["search_failures"] == 1, "部分成功不会重置已有风控计数")
+
+        tripped = guard.observe(
+            clean=False, search_errors=["风控：第二次"], logger=messages.append
+        )
+        check(tripped, "连续两次搜索风控触发熔断")
+        skip, message = guard.should_skip()
+        check(skip and "第 1 次熔断" in message and "--force" in message, "熔断后提示等级和 --force")
+        state = guard.status()
+        check(
+            abs(state["paused_until"] - time.time() - 3600) < 15,
+            "首次风控冷却按 24 小时基准（测试配置 60 分钟）",
+        )
+
+        login = tmp / "data" / "login_state.json"
+        login.write_text('{"unb": "1"}', encoding="utf-8")
+        later = time.time() + 1
+        os.utime(login, (later, later))
+        state = guard.status()
+        search_skip, _message = guard.should_skip()
+        check(search_skip, "重新登录不会立即解除冷却")
+        check(state["search_failures"] == 2, "重新登录不会清零计数")
+        check(
+            0 < state["paused_until"] - time.time() <= 5 * 60 + 2,
+            "重新登录只保留最短冷静期",
+        )
+
+        past = time.time() - 100
+        os.utime(login, (past, past))
+        state["paused_until"] = time.time() - 1
+        state["paused_at"] = time.time() - 4000
+        state["login_quiet_until"] = 0.0
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        check(not guard.should_skip()[0], "冷却到期自动放行")
+        after = guard.status()
+        check(
+            after["search_failures"] == 0 and after["trip_level"] == 1,
+            "冷却到期清连续计数但保留熔断等级",
+        )
+
+        guard.observe(clean=False, search_errors=["风控：升级一"], logger=messages.append)
+        check(
+            guard.observe(clean=False, search_errors=["风控：升级二"], logger=messages.append),
+            "冷却后再次连续风控会重新熔断",
+        )
+        state = guard.status()
+        check(
+            abs(state["paused_until"] - time.time() - 7200) < 15,
+            "重复熔断冷却时间翻倍",
+        )
+
+        guard.observe(clean=True, logger=messages.append)
+        after = guard.status()
+        check(
+            after["search_failures"] == 0
+            and after["trip_level"] == 0
+            and after["paused_until"] == 0,
+            "完全干净的一轮把计数和升级等级清零",
+        )
+
+        guard.observe(clean=False, soft_errors=["等待第 1 页搜索结果超时"], logger=messages.append)
+        tripped = guard.observe(
+            clean=False, soft_errors=["全部关键词返回 0 条"], logger=messages.append
+        )
+        check(tripped, "连续软失败也会触发冷却")
+        state = guard.status()
+        check(
+            state["trip_reason"] == "软失败"
+            and abs(state["paused_until"] - time.time() - 600) < 15,
+            "软失败使用单独的冷却时长",
+        )
+
+        guard.observe(clean=True, logger=messages.append)
+        check(guard.status()["soft_failures"] == 0, "干净轮次清零软失败计数")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_scan_safety() -> None:
+    print("scan safety")
+    watch = CFG.watches[0]
+    other = CFG.watches[1]
+    check(can_fetch_details([watch], {watch.name: []}, {}), "搜索无错误时允许抓详情")
+    check(
+        not can_fetch_details([watch, other], {watch.name: []}, {"风控": "风控：人机验证"}),
+        "只要有一轮报错就跳过详情",
+    )
+    check(
+        not can_fetch_details([watch, other], {watch.name: []}, {}),
+        "关键词没跑完时跳过详情",
+    )
+
+    cfg = replace(CFG, browser=replace(CFG.browser, headful_fallback=True))
+    no_data = {watch.name: []}
+    check(
+        not should_retry_headful(cfg, no_data, {watch.name: "风控：人机验证"}, None),
+        "风控不自动切有头重试",
+    )
+    check(
+        not should_retry_headful(cfg, no_data, {watch.name: "需要登录：未登录"}, None),
+        "登录失效不自动切有头重试",
+    )
+    check(
+        should_retry_headful(cfg, no_data, {watch.name: "等待第 1 页搜索结果超时"}, None),
+        "普通超时允许切有头重试一次",
+    )
+    check(not should_retry_headful(cfg, no_data, {}, None), "没有错误时不重试")
+    one = Listing("1", "联想拯救者R9000P RTX3060 16G", 3300, "u")
+    check(
+        not should_retry_headful(cfg, {watch.name: [one]}, {watch.name: "超时"}, None),
+        "已经有数据时不重试",
+    )
+    check(
+        not should_retry_headful(cfg, no_data, {watch.name: "超时"}, False),
+        "已经是有头模式时不再重试",
+    )
+    check(
+        not should_retry_headful(
+            replace(cfg, browser=replace(cfg.browser, headful_fallback=False)),
+            no_data,
+            {watch.name: "超时"},
+            None,
+        ),
+        "关闭 headful_fallback 后不重试",
+    )
+
+    clean, groups = classify_round([watch], {watch.name: [one]}, {})
+    check(clean and not any(groups.values()), "无错误且有数据算完全干净")
+    clean, groups = classify_round([watch], {watch.name: []}, {})
+    check(
+        not clean and groups["soft"] == ["全部关键词返回 0 条"],
+        "0 条结果记为软失败，不算干净轮",
+    )
+    clean, groups = classify_round(
+        [watch], {watch.name: [one]}, {"详情": "详情风控：人机验证"}
+    )
+    check(
+        not clean and groups["detail_risk"],
+        "详情风控单独计数且本轮不算干净",
+    )
+
+
+def test_scan_lock_and_log() -> None:
+    print("scan lock / log")
+    tmp = ROOT / "data" / "_selftest_lock"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        lock_path = tmp / "scan.lock"
+        with ScanLock(lock_path):
+            try:
+                with ScanLock(lock_path):
+                    check(False, "同一时间只允许一个扫描锁")
+            except ScanBusy as exc:
+                check("pid=" in str(exc), "锁冲突时返回持有者信息")
+        with ScanLock(lock_path):
+            pass
+        check(True, "上一个扫描释放后可以重新获取锁")
+
+        cfg = replace(CFG, root=tmp)
+        path = log_scan(
+            cfg,
+            status="clean",
+            elapsed=12.34,
+            requests={"search_requests": 7, "detail_requests": 2},
+            search_risk=0,
+            detail_risk=0,
+            soft_failures=0,
+        )
+        text = path.read_text(encoding="utf-8")
+        check(
+            path.name == f"scan-{time.strftime('%Y-%m-%d')}.log",
+            "日志按天切分",
+        )
+        check(
+            "requests=9" in text
+            and "search_requests=7" in text
+            and "detail_requests=2" in text
+            and "elapsed=12.3s" in text,
+            "日志记录请求数、分类计数和耗时",
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_run_scan_guard() -> None:
+    print("run_scan guard")
+    tmp = ROOT / "data" / "_selftest_run_guard"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        from xianyu import engine as engine_mod
+
+        cfg = replace(
+            CFG,
+            root=tmp,
+            scan=replace(
+                CFG.scan,
+                failure_threshold=1,
+                detail_failure_threshold=99,
+                soft_failure_threshold=99,
+            ),
+        )
+        RiskGuard(cfg).observe(
+            clean=False, search_errors=["风控：测试"], logger=lambda _: None
+        )
+        original = engine_mod.Crawler
+
+        class BoomCrawler:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("冷却期间不应该启动浏览器")
+
+        engine_mod.Crawler = BoomCrawler
+        try:
+            try:
+                run_scan(cfg, [cfg.watches[0]], logger=lambda _: None)
+                check(False, "run_scan 应该拦截风控冷却")
+            except ScanPaused as exc:
+                check("冷却" in str(exc), "should_skip 已内置到 run_scan")
+        finally:
+            engine_mod.Crawler = original
+
+        log_path = tmp / "logs" / f"scan-{time.strftime('%Y-%m-%d')}.log"
+        check(
+            log_path.is_file() and "status=cooldown" in log_path.read_text(encoding="utf-8"),
+            "冷却跳过也会写入当天日志",
+        )
+        try:
+            with ScanLock(tmp / "data" / "scan.lock"):
+                pass
+            check(True, "冷却退出后扫描锁已释放")
+        except ScanBusy:
+            check(False, "冷却退出后扫描锁应释放")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_collect_live_risk_stop() -> None:
+    print("risk stop")
+    from xianyu import engine as engine_mod
+
+    watch_a, watch_b, watch_c = CFG.watches[:3]
+    now = int(time.time() * 1000)
+    listing = Listing("5001", "联想拯救者R9000P RTX3060 16G", 3300, "u")
+    listing.publish_ts = now
+    calls: list[str] = []
+
+    class FakeCrawler:
+        def __init__(self, cfg, headless=None, logger=print):
+            self.stats = {"search_requests": 0, "detail_requests": 0}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def search(self, watch, pages=None):
+            calls.append(watch.name)
+            self.stats["search_requests"] += 1
+            if watch.name == watch_b.name:
+                raise RiskControl("触发人机验证")
+            return [listing]
+
+    detail_calls: list[str] = []
+    requests: dict[str, int] = {}
+    original = engine_mod.Crawler
+    engine_mod.Crawler = FakeCrawler
+    try:
+        cfg = replace(CFG, browser=replace(CFG.browser, min_delay=0, max_delay=0))
+        collected, errors = collect_live(
+            cfg,
+            [watch_a, watch_b, watch_c],
+            on_collected=lambda *_: detail_calls.append("详情"),
+            stats=requests,
+            logger=lambda _: None,
+        )
+    finally:
+        engine_mod.Crawler = original
+
+    check(calls == [watch_a.name, watch_b.name], "首次风控后不再搜索剩余关键词")
+    check(watch_b.name in errors and "风控" in errors[watch_b.name], "风控写入错误")
+    check("详情" not in errors, "详情阶段没有启动")
+    check(detail_calls == [], "搜索不完整时不抓详情")
+    check(list(collected) == [watch_a.name], "已拿到的结果保留")
+    check(requests.get("search_requests") == 2, "统计本轮实际搜索请求数")
+
+
+def test_detail_cache() -> None:
+    print("detail cache")
+    tmp = ROOT / "data" / "_selftest_detail"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    conn = None
+    try:
+        db = tmp / "detail.db"
+        table_path = tmp / "price_table.json"
+        table_path.write_text(
+            json.dumps(
+                {
+                    "rows": [
+                        {"name": row.name, "gpu": row.gpu, "price": row.price}
+                        for row in FIXTURE_ROWS
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        watch = CFG.watches[0]
+        cfg = replace(
+            CFG,
+            root=tmp,
+            watches=[watch],
+            scan=replace(CFG.scan, detail_limit=5),
+            price_table=PriceTableConfig(path=table_path),
+        )
+        now = int(time.time() * 1000)
+        ids = {"A": "4001", "B": "4002", "C": "4003"}
+        base_title = "联想拯救者R9000P 2021 RTX3060 16G 512G 个人自用 无拆修"
+        titles = {
+            "A": base_title,
+            "B": base_title + " 已联系",
+            "C": base_title + " 已缓存",
+        }
+        conn = connect(db)
+        scan_id = start_scan(conn, 1)
+        listings: dict[str, Listing] = {}
+        for key, item_id in ids.items():
+            listing = Listing(item_id, titles[key], 3300, "u")
+            listing.watch = watch.name
+            listing.publish_ts = now
+            upsert(conn, listing, analyze(listing, watch, FIXTURE_ROWS, cfg, now), scan_id)
+            listings[key] = listing
+        set_status(conn, ids["B"], "contacted")
+        save_details(conn, {ids["C"]: "缓存描述：个人自用，配件齐全"})
+        collected = {watch.name: [listings["A"], listings["B"], listings["C"]]}
+
+        class FakeCrawler:
+            def __init__(self) -> None:
+                self.calls: list[list[str]] = []
+
+            def fetch_details(self, items: list[Listing]) -> dict[str, str]:
+                self.calls.append([item.item_id for item in items])
+                return {item.item_id: f"新描述-{item.item_id}" for item in items}
+
+        crawler = FakeCrawler()
+        _enrich_details(cfg, crawler, collected, db_path=db, logger=lambda _: None)
+        check(crawler.calls == [[ids["A"]]], "只抓待审核且未缓存的详情")
+        check(listings["A"].desc == f"新描述-{ids['A']}", "新详情写回当前商品")
+        check(listings["B"].desc == "", "已联系商品不再抓详情")
+        check(listings["C"].desc == "缓存描述：个人自用，配件齐全", "缓存描述在分析前套用")
+
+        cached, skip_ids = load_detail_cache(conn)
+        check(cached[ids["A"]].startswith("新描述") and ids["C"] in cached, "详情写入缓存表")
+        check(ids["B"] in skip_ids and ids["C"] in skip_ids, "已联系和已缓存商品进入跳过集合")
+
+        again = []
+        for key, item_id in ids.items():
+            listing = Listing(item_id, titles[key], 3300, "u")
+            listing.watch = watch.name
+            listing.publish_ts = now
+            again.append(listing)
+        crawler2 = FakeCrawler()
+        _enrich_details(cfg, crawler2, {watch.name: again}, db_path=db, logger=lambda _: None)
+        check(crawler2.calls == [], "第二轮全部命中缓存/跳过集合，不再打开详情页")
+        check(again[0].desc.startswith("新描述"), "第二轮沿用缓存描述")
+    finally:
+        if conn is not None:
+            conn.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_config_guard() -> None:
     print("config")
     check(bool(CFG.signals.merchant_reject), "merchant_reject 硬排除词表生效")
     check(bool(CFG.signals.boot_reject), "boot_reject 开机故障词表生效")
     check(bool(CFG.signals.merchant), "merchant 商家硬排除词表生效")
     check("数码" in CFG.filters.seller_exclude, "seller_exclude 包含数码类商家词")
-    check(CFG.scan.detail_limit == 20, "scan.detail_limit 可读")
+    check(CFG.scan.detail_limit == 5, "scan.detail_limit 默认 5 条")
+    check(CFG.scan.failure_threshold == 3, "scan.failure_threshold 可读")
+    check(CFG.scan.detail_failure_threshold == 3, "scan.detail_failure_threshold 可读")
+    check(CFG.scan.soft_failure_threshold == 3, "scan.soft_failure_threshold 可读")
+    check(CFG.scan.cooldown_minutes == 1440, "scan.cooldown_minutes 默认 24 小时")
+    check(CFG.scan.cooldown_max_minutes == 10080, "scan.cooldown_max_minutes 默认 7 天")
+    check(CFG.scan.soft_cooldown_minutes == 60, "scan.soft_cooldown_minutes 可读")
+    check(CFG.scan.login_quiet_minutes == 60, "scan.login_quiet_minutes 可读")
 
     tmp = ROOT / "data" / "_selftest"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -452,6 +1002,13 @@ def main() -> int:
     test_filters()
     test_reference_tiers()
     test_negation()
+    test_notify_dedup()
+    test_risk_guard()
+    test_scan_safety()
+    test_scan_lock_and_log()
+    test_run_scan_guard()
+    test_collect_live_risk_stop()
+    test_detail_cache()
     test_config_guard()
     test_table_and_score()
     test_store_and_report()

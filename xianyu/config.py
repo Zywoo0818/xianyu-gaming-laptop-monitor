@@ -106,7 +106,15 @@ class ScanConfig:
     min_score: float = 55
     min_gap: float = 100
     top_n_markdown: int = 20
-    detail_limit: int = 20
+    detail_limit: int = 5
+    failure_threshold: int = 3
+    detail_failure_threshold: int = 3
+    soft_failure_threshold: int = 3
+    cooldown_minutes: int = 1440
+    cooldown_max_minutes: int = 10080
+    soft_cooldown_minutes: int = 60
+    soft_cooldown_max_minutes: int = 1440
+    login_quiet_minutes: int = 60
 
 
 @dataclass
@@ -236,7 +244,37 @@ class Config:
             min_score=_as_float(scan_raw.get("min_score"), 55, "scan.min_score"),
             min_gap=_as_float(scan_raw.get("min_gap"), 100, "scan.min_gap"),
             top_n_markdown=_as_int(scan_raw.get("top_n_markdown"), 20, "scan.top_n_markdown", 1),
-            detail_limit=_as_int(scan_raw.get("detail_limit"), 20, "scan.detail_limit", 0),
+            detail_limit=_as_int(scan_raw.get("detail_limit"), 5, "scan.detail_limit", 0),
+            failure_threshold=_as_int(
+                scan_raw.get("failure_threshold"), 3, "scan.failure_threshold", 0
+            ),
+            detail_failure_threshold=_as_int(
+                scan_raw.get("detail_failure_threshold"),
+                3,
+                "scan.detail_failure_threshold",
+                0,
+            ),
+            soft_failure_threshold=_as_int(
+                scan_raw.get("soft_failure_threshold"), 3, "scan.soft_failure_threshold", 0
+            ),
+            cooldown_minutes=_as_int(
+                scan_raw.get("cooldown_minutes"), 1440, "scan.cooldown_minutes", 1
+            ),
+            cooldown_max_minutes=_as_int(
+                scan_raw.get("cooldown_max_minutes"), 10080, "scan.cooldown_max_minutes", 1
+            ),
+            soft_cooldown_minutes=_as_int(
+                scan_raw.get("soft_cooldown_minutes"), 60, "scan.soft_cooldown_minutes", 1
+            ),
+            soft_cooldown_max_minutes=_as_int(
+                scan_raw.get("soft_cooldown_max_minutes"),
+                1440,
+                "scan.soft_cooldown_max_minutes",
+                1,
+            ),
+            login_quiet_minutes=_as_int(
+                scan_raw.get("login_quiet_minutes"), 60, "scan.login_quiet_minutes", 1
+            ),
         )
 
         category_raw = raw.get("category") or {}

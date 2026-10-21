@@ -20,7 +20,15 @@ scan:
   min_score: 55       # 低于这个分数不进报表
   max_age_hours: 0    # >0 时只看最近 N 小时发布的
   top_n_markdown: 20
-  detail_limit: 20    # 只给初筛候选抓详情描述，最多 N 条；0 = 关闭详情细筛
+  detail_limit: 5     # 每轮最多抓 N 条详情；抓过的会缓存、不再重复请求；0 = 关闭
+  failure_threshold: 3           # 连续 N 轮搜索风控后熔断；0 = 关闭
+  detail_failure_threshold: 3    # 连续 N 轮详情风控后熔断；0 = 关闭
+  soft_failure_threshold: 3      # 连续 N 轮 0 结果/超时/未知接口错误后熔断；0 = 关闭
+  cooldown_minutes: 1440         # 首次熔断 24 小时，之后逐次翻倍
+  cooldown_max_minutes: 10080     # 风控熔断上限 7 天
+  soft_cooldown_minutes: 60      # 软失败首次冷却 1 小时
+  soft_cooldown_max_minutes: 1440 # 软失败冷却上限 24 小时
+  login_quiet_minutes: 60        # 熔断后重新登录的最短冷静期，不会立即解除
 
 # -----------------------------------------------------------------------------
 #  行情表：直接读你自己的《笔电行情.xlsx》导出结果
@@ -110,6 +118,8 @@ watches:
     pages: 1
 
 # 推送（可选）
+# 只有成功发出去的商品才会记为“已推送”，下次扫描不会重复发；
+# 发送失败会自动留在待推送队列里，下次扫描继续重试。
 notify:
   wecom_webhook: ""
   bark_url: ""

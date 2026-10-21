@@ -1,11 +1,12 @@
-﻿# 注册 / 卸载 Windows 定时任务
+﻿# 可选：注册 / 卸载 Windows 定时任务
+# 日常建议需要时手动运行 scan.bat；自动轮询会增加闲鱼风控概率。
 # 用法：
-#   powershell -ExecutionPolicy Bypass -File .\register_task.ps1            # 每 20 分钟跑一次
-#   powershell -ExecutionPolicy Bypass -File .\register_task.ps1 -Minutes 30
+#   powershell -ExecutionPolicy Bypass -File .\register_task.ps1            # 每 60 分钟跑一次（可选）
+#   powershell -ExecutionPolicy Bypass -File .\register_task.ps1 -Minutes 90
 #   powershell -ExecutionPolicy Bypass -File .\register_task.ps1 -Unregister
 
 param(
-    [int]$Minutes = 20,
+    [int]$Minutes = 60,
     [string]$TaskName = "XianyuScan",
     [switch]$Unregister
 )
@@ -25,9 +26,10 @@ if ($Unregister) {
     exit 0
 }
 
-if ($Minutes -lt 10) {
-    Write-Host "间隔太短容易触发风控，建议 >= 15 分钟。" -ForegroundColor Yellow
+if ($Minutes -lt 30) {
+    Write-Host "注意：间隔低于 30 分钟会明显增加风控概率，建议按需手动运行 scan.bat。" -ForegroundColor Yellow
 }
+Write-Host "提示：日常推荐需要时手动运行 scan.bat；定时任务仅作可选兜底。" -ForegroundColor Yellow
 
 $action = New-ScheduledTaskAction -Execute $bat -WorkingDirectory $root
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
@@ -37,8 +39,9 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances 
     -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-    -Settings $settings -Description "闲鱼笔记本低价监控" -Force | Out-Null
+    -Settings $settings -Description "闲鱼笔记本低价监控（可选定时，建议手动运行）" -Force | Out-Null
 
 Write-Host "已注册定时任务：$TaskName（每 $Minutes 分钟）" -ForegroundColor Green
-Write-Host "日志：$root\logs\scan.log"
+Write-Host "日志：$root\logs\scan-YYYY-MM-DD.log（按天切分）"
 Write-Host "查看任务：Get-ScheduledTask -TaskName $TaskName"
+Write-Host "手动运行：$root\scan.bat"

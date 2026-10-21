@@ -11,9 +11,11 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import Config, ConfigError
-from .crawler import CrawlError, LoginRequired, RiskControl, do_login, is_logged_in
-from .engine import run_scan
+from .crawler import do_login, is_logged_in
+from .engine import ScanPaused, run_scan
+from .lock import ScanBusy
 from .report import money, row_to_item, write_all
+from . import __version__
 from .store import (
     STATUS_LABELS,
     connect,
@@ -21,6 +23,8 @@ from .store import (
     get_scan,
     latest_scan,
     list_rows_by_status,
+    mark_notified,
+    pending_notify,
     rows_for_scan,
     set_status,
 )
@@ -44,19 +48,9 @@ def cmd_login(args) -> int:
         _say(f"✗ 登录失败：{exc}")
         return 1
     _say(f"✓ 已保存登录态：{payload['login_at']}")
-
-    # 顺手验证一次搜索接口
-    _say("正在验证搜索接口…")
-    from .crawler import Crawler
-
-    watch = cfg.watches[0]
-    try:
-        with Crawler(cfg, headless=True, logger=lambda *_: None) as crawler:
-            listings = crawler.search(watch, pages=1)
-        _say(f"✓ 搜索正常，抓到 {len(listings)} 条（关键词：{watch.keyword}）")
-    except (RiskControl, CrawlError, LoginRequired) as exc:
-        _say(f"⚠ 登录已保存，但搜索测试没通过：{exc}")
-        _say("  可以先跑一次：python -m xianyu scan --headed")
+    if is_logged_in(cfg):
+        _say(f"✓ 已确认登录 cookie（用户 ID {payload['unb']}），本次没有发起搜索请求。")
+    _say("  首次扫描请手动运行：scan.bat")
     return 0
 
 
@@ -68,6 +62,7 @@ def cmd_scan(args) -> int:
         _say("⚠ 还没检测到登录态。若抓不到数据，先运行：python -m xianyu login")
     _say(f"=== {BANNER} ===")
     _say(f"关键词 {len(watches)} 个 · 每个 {args.pages or cfg.scan.pages} 页 · 模式：{'演示' if args.demo else '真实抓取'}")
+
     _say("")
     headless = False if args.headed else None
     db_path = (cfg.data_dir / "demo.db") if args.demo else None
@@ -79,8 +74,17 @@ def cmd_scan(args) -> int:
             demo=args.demo,
             pages=args.pages,
             db_path=db_path,
+            force=args.force,
             logger=_say,
         )
+    except ScanPaused as exc:
+        _say("")
+        _say(f"⚠ {exc}")
+        return 0
+    except ScanBusy as exc:
+        _say("")
+        _say(f"⚠ {exc}，本轮跳过")
+        return 0
     except ConfigError as exc:
         _say(f"✗ 配置错误：{exc}")
         return 2
@@ -117,11 +121,26 @@ def cmd_scan(args) -> int:
     _say(f"最新：{outcome.paths['latest_html']}")
     _say(f"摘要：{outcome.paths['md']}")
 
-    if not args.no_notify:
+    if not args.no_notify and cfg.notify.enabled:
         from .notify import push
 
-        for message in push(cfg, outcome.items, title="闲鱼低价提醒"):
+        conn = connect(db_path or cfg.db_path)
+        try:
+            now_ms = int(datetime.now().timestamp() * 1000)
+            queue = pending_notify(conn, cfg.notify.min_score)
+            result = push(
+                cfg,
+                [row_to_item(row, now_ms) for row in queue],
+                title="闲鱼低价提醒",
+            )
+            if result.sent_ids:
+                mark_notified(conn, result.sent_ids)
+        finally:
+            conn.close()
+        for message in result.messages:
             _say(f"  {message}")
+        if result.sent_ids:
+            _say(f"  已记录 {len(result.sent_ids)} 条为已推送，下次不会重复")
 
     if args.open_report and outcome.paths.get("latest_html"):
         import webbrowser
@@ -336,6 +355,9 @@ def cmd_doctor(args) -> int:
         _say("  运行：python -m xianyu import-prices \"E:\\useful\\文件\\笔电行情.xlsx\"")
     _say(f"{'✓' if is_logged_in(cfg) else '⚠'} 登录态：{cfg.data_dir / 'login_state.json'}"
          + ("" if is_logged_in(cfg) else "（还没登录，运行 python -m xianyu login）"))
+    from .guard import RiskGuard
+
+    _say(f"· {RiskGuard(cfg).describe()}")
     _say(f"{'✓' if cfg.db_path.is_file() else '·'} 数据库：{cfg.db_path}")
     try:
         probe = cfg.reports_dir / ".write_test"
@@ -356,7 +378,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("-c", "--config", default="config.yaml", help="配置文件路径（默认 config.yaml）")
 
     parser = argparse.ArgumentParser(prog="python -m xianyu", description=BANNER)
-    parser.add_argument("--version", action="version", version="xianyu-monitor 1.0")
+    parser.add_argument("--version", action="version", version=f"xianyu-monitor {__version__}")
     sub = parser.add_subparsers(dest="command")
 
     p_login = sub.add_parser("login", parents=[common], help="扫码登录并保存登录态")
@@ -369,6 +391,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--headed", action="store_true", help="显示浏览器窗口（风控时用）")
     p_scan.add_argument("--demo", action="store_true", help="用内置演示数据，不联网")
     p_scan.add_argument("--no-notify", action="store_true", help="本次不推送")
+    p_scan.add_argument("--force", action="store_true", help="忽略风控冷却，强制扫描一次")
     p_scan.add_argument("--open-report", action="store_true", help="结束后自动打开报表")
     p_scan.add_argument("--top", type=int, default=5, help="终端里打印前几条（默认 5）")
     p_scan.set_defaults(func=cmd_scan)
