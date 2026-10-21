@@ -74,6 +74,10 @@ GIFT_PREFIXES = ("送", "带", "含", "附", "赠")
 CONTRAST_PREFIXES = ("比", "不如", "胜过", "优于", "不是", "并非")
 _PREFIX_SPLIT = re.compile(r"[，,。；;、！!？?|/\s]+")
 
+# N95（Alder Lake-N）是迷你主机/软路由的 U，正经游戏本不会用；
+# 边界判断放过 N950/N950KP 等机型编号，赠品「N95 口罩」也不算。
+_REJECT_CPU = re.compile(r"(?<![a-z0-9])n95(?![0-9a-z])")
+
 
 def _spec_adjust(title: str, ref: float) -> tuple[float, list[str]]:
     """按标题里的内存/硬盘容量对行情表价格做加减（只在有明确上下文时生效）。"""
@@ -255,9 +259,26 @@ def _disk_gb(text: str) -> list[int]:
     return values
 
 
+def _rejected_cpu(text: str) -> str:
+    lowered = text.casefold()
+    for match in _REJECT_CPU.finditer(lowered):
+        prefix = lowered[max(0, match.start() - 8) : match.start()]
+        prefix = _PREFIX_SPLIT.sub(" ", prefix).strip()
+        if any(word in prefix for word in ("不是", "并非", "非")):
+            continue
+        if lowered[match.end() :].lstrip().startswith("口罩"):
+            continue
+        return "N95"
+    return ""
+
+
 def _fatal_reject_reason(listing: Listing, cfg: Config) -> str:
     """商家/故障硬规则：命中就不进入打分和报表。"""
     text = f"{listing.title}\n{listing.desc or ''}".casefold()
+    cpu = _rejected_cpu(text)
+    if cpu:
+        return f"处理器 {cpu}，直接排除"
+
     missing = hit_words(
         text,
         cfg.signals.merchant_reject,

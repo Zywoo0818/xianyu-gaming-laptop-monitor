@@ -32,7 +32,7 @@ from xianyu.engine import (  # noqa: E402
 from xianyu.guard import RiskGuard, classify_errors, is_risk_error  # noqa: E402
 from xianyu.lock import ScanBusy, ScanLock  # noqa: E402
 from xianyu.models import Listing  # noqa: E402
-from xianyu.notify import WECOM_LIMIT, push  # noqa: E402
+from xianyu.notify import WECOM_LIMIT, _check_response, push  # noqa: E402
 from xianyu.parse import parse_item, parse_payload  # noqa: E402
 from xianyu.pricetable import PriceRow, load_table, match_reference, normalize_name  # noqa: E402
 from xianyu.pricing import REJECT_BLOCKED_TAILS, analyze, gate, passes_filters  # noqa: E402
@@ -229,6 +229,12 @@ def test_fatal_reject() -> None:
     check_fatal("联想拯救者R9000P RTX3060 16G 512G", desc="机器无法开机")
     check_keep("联想拯救者R9000P RTX3060 16G 512G 不是空机 无拆修")
 
+    check_fatal("联想拯救者R9000P RTX3060 16G 512G 处理器 N95")
+    check_fatal("联想拯救者R9000P RTX3060 16G 512G", desc="CPU：N95，16G 内存")
+    check_keep("神舟 N950KP RTX3060 游戏本")
+    check_keep("联想拯救者R9000P RTX3060 16G 512G 不是 N95")
+    check_keep("联想拯救者R9000P RTX3060 16G 512G 送 N95 口罩")
+
     check(
         hit_words("无硬盘位", CFG.signals.merchant_reject, blocked_tails=REJECT_BLOCKED_TAILS)
         == [],
@@ -398,6 +404,22 @@ def test_notify_dedup() -> None:
         if conn is not None:
             conn.close()
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_notify_response() -> None:
+    print("notify response")
+    ok, _ = _check_response('{"errcode":0,"errmsg":"ok"}')
+    check(ok, "企业微信 errcode=0 判定成功")
+    ok, detail = _check_response('{"errcode":93000,"errmsg":"invalid webhook url"}')
+    check(not ok and "93000" in detail, "企业微信 errcode 非 0 判定失败")
+    ok, _ = _check_response('{"code":200,"message":"success"}')
+    check(ok, "Bark code=200 判定成功")
+    ok, detail = _check_response('{"code":500,"message":"failed"}')
+    check(not ok and "500" in detail, "Bark code 非 200 判定失败")
+    ok, _ = _check_response("<html>proxy error</html>")
+    check(not ok, "非 JSON 响应判定失败")
+    ok, _ = _check_response('{"foo":"bar"}')
+    check(not ok, "缺少状态字段判定失败")
 
 
 def test_risk_guard() -> None:
@@ -1003,6 +1025,7 @@ def main() -> int:
     test_reference_tiers()
     test_negation()
     test_notify_dedup()
+    test_notify_response()
     test_risk_guard()
     test_scan_safety()
     test_scan_lock_and_log()

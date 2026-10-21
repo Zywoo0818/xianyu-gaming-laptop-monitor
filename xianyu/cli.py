@@ -121,7 +121,10 @@ def cmd_scan(args) -> int:
     _say(f"最新：{outcome.paths['latest_html']}")
     _say(f"摘要：{outcome.paths['md']}")
 
-    if not args.no_notify and cfg.notify.enabled:
+    if args.demo and cfg.notify.enabled and not args.no_notify:
+        _say("  演示模式：不发送真实推送")
+
+    if not args.no_notify and not args.demo and cfg.notify.enabled:
         from .notify import push
 
         conn = connect(db_path or cfg.db_path)

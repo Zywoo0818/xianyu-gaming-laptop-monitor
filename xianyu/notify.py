@@ -25,6 +25,23 @@ class NotifyResult:
     sent_ids: set[str] = field(default_factory=set)
 
 
+def _check_response(text: str) -> tuple[bool, str]:
+    """企业微信和 Bark 失败时也可能返回 HTTP 200，必须看响应体里的状态码。"""
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return False, f"响应不是合法 JSON：{text[:160]}"
+    if not isinstance(data, dict):
+        return False, f"响应格式异常：{text[:160]}"
+    if "errcode" in data and data.get("errcode") not in (0, "0"):
+        return False, f"errcode={data.get('errcode')} {data.get('errmsg', '')}".strip()
+    if "code" in data and data.get("code") not in (200, "200"):
+        return False, f"code={data.get('code')} {data.get('message', '')}".strip()
+    if "errcode" not in data and "code" not in data:
+        return False, f"响应缺少状态字段：{text[:160]}"
+    return True, text[:200]
+
+
 def _post_json(url: str, payload: dict[str, Any], timeout: int = 15) -> tuple[bool, str]:
     try:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -35,7 +52,7 @@ def _post_json(url: str, payload: dict[str, Any], timeout: int = 15) -> tuple[bo
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             text = response.read().decode("utf-8", "replace")
-        return True, text[:200]
+        return _check_response(text)
     except Exception as exc:  # noqa: BLE001 - 推送失败只记录，不影响扫描
         return False, str(exc)[:200]
 
@@ -91,7 +108,7 @@ def push(
         )
         ok, detail = send(
             cfg.notify.bark_url.rstrip("/"),
-            {"title": f"{title} · {len(selected)} 条", "body": text, "group": "闲鱼"},
+            {"title": f"{title} · 本次 {len(batch)} 条", "body": text, "group": "闲鱼"},
         )
         result.messages.append("Bark 推送成功" if ok else f"Bark 推送失败：{detail}")
         if ok:
