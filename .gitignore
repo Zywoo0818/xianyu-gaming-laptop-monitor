@@ -1,0 +1,25 @@
+.venv/
+data/
+reports/
+logs/
+dist/
+vendor/
+_ref/
+.tmp/
+.workbuddy/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+*.zip
+*.log
+*.bak
+*.bak-*
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 个人行情表（含收机价，不上传）
+笔电行情.xlsx
+~$*.xlsx

@@ -1,0 +1,7 @@
+{
+  "_expect": {"listings": 0, "note": "关键词真的没有结果：不是错误，报表应显示 0 条"},
+  "api": "mtop.taobao.idlemtopsearch.pc.search",
+  "ret": ["SUCCESS::调用成功"],
+  "v": "1.0",
+  "data": {"resultList": []}
+}

@@ -1,0 +1,95 @@
+{
+  "_expect": {"listings": 3, "note": "5 条 resultList 里应有 2 条因缺 itemId/价格被丢弃"},
+  "api": "mtop.taobao.idlemtopsearch.pc.search",
+  "ret": ["SUCCESS::调用成功"],
+  "v": "1.0",
+  "data": {
+    "resultList": [
+      {
+        "data": {
+          "item": {
+            "main": {
+              "clickParam": {
+                "args": {
+                  "publishTime": 1792900000000,
+                  "wantNum": 7,
+                  "seller_id": "2200000000001",
+                  "tag": "freeship"
+                }
+              },
+              "exContent": {
+                "itemId": "700000000001",
+                "title": "联想拯救者Y7000 2021 R7000 锐龙R7000 16G 512G RTX3060 游戏本",
+                "price": [{"text": "2"}, {"text": "850"}],
+                "picUrl": "https://gw.alicdn.com/bao/uploaded/i1/O1CN01a.jpg",
+                "area": "浙江 杭州",
+                "userNickName": "小李数码器材",
+                "wantNum": 7,
+                "fishTags": {
+                  "r1": {"tagList": [{"data": {"content": "验货宝"}}]}
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "data": {
+          "item": {
+            "main": {
+              "clickParam": {"args": {"publishTime": 1792890000, "wantNum": 128, "seller_id": "2200000000002"}},
+              "exContent": {
+                "itemId": "700000000002",
+                "title": "华硕天选3 天选4 满血RTX4060 16G 512G 电竞笔记本电脑 1.2万以下别问",
+                "price": [{"text": "1.2万"}],
+                "picUrl": "https://gw.alicdn.com/bao/uploaded/i2/O1CN01b.jpg",
+                "area": "广东 深圳",
+                "userNickName": "华强北批发仓库",
+                "fishTags": {"r1": {"tagList": [{"content": "可小刀"}]}}
+              }
+            }
+          }
+        }
+      },
+      {
+        "data": {
+          "item": {
+            "main": {
+              "clickParam": {"args": {"publishTime": 1792880000000, "wantNum": 0}},
+              "exContent": {
+                "itemId": "700000000003",
+                "title": "机械革命蛟龙16Pro 无拆修 正常开机 电池健康98%",
+                "price": [{"text": "4399"}],
+                "picUrl": "https://gw.alicdn.com/bao/uploaded/i3/O1CN01c.jpg",
+                "exContentUnused": "字段兜底：area/city 二选一",
+                "city": "江苏 苏州",
+                "userNick": "个人闲置",
+                "sellerId": "2200000000003"
+              }
+            }
+          }
+        }
+      },
+      {
+        "data": {
+          "item": {
+            "main": {
+              "clickParam": {"args": {}},
+              "exContent": {"title": "没有 itemId 的条目应当被丢弃", "price": [{"text": "100"}]}
+            }
+          }
+        }
+      },
+      {
+        "data": {
+          "item": {
+            "main": {
+              "clickParam": {"args": {"publishTime": 1792870000000}},
+              "exContent": {"itemId": "700000000005", "title": "价格缺失应当被丢弃", "price": []}
+            }
+          }
+        }
+      }
+    ]
+  }
+}

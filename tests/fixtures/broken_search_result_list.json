@@ -1,0 +1,7 @@
+{
+  "_expect": {"error": "ParseError", "note": "resultList 换成对象：结构变了，离线就能复现，不用赌真实请求"},
+  "api": "mtop.taobao.idlemtopsearch.pc.search",
+  "ret": ["SUCCESS::调用成功"],
+  "v": "1.0",
+  "data": {"resultList": {"items": []}}
+}

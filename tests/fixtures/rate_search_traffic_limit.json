@@ -1,0 +1,6 @@
+{
+  "api": "mtop.taobao.idlemtopsearch.pc.search",
+  "ret": ["FAIL_SYS_TRAFFIC_LIMIT::哎呦喂，被挤爆啦，请稍后重试"],
+  "v": "1.0",
+  "data": {}
+}

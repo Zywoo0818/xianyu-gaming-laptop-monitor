@@ -1,0 +1,6 @@
+{
+  "_expect": {"error": "ParseError", "note": "接口不再返回 data：改版迹象，改 parse/selectors，不是风控"},
+  "api": "mtop.taobao.idlemtopsearch.pc.search",
+  "ret": ["SUCCESS::调用成功"],
+  "v": "1.0"
+}
