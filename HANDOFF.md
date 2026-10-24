@@ -19,13 +19,13 @@ E:\公共项目\xianyu\xianyu1022\option2-login
 - `E:\公共项目\xianyu\xianyu1022\option1-cdp`：有头 CDP + 卖家主页细筛。**不要修改**。
 - `E:\公共项目\xianyu\xianyu1022\option3-headless`：无头/匿名路线存档。**当前不维护**。
 
-本目录**不是 git 仓库**（没有 `.git`）。不要假设可以靠 `git diff` / `git checkout` 回退。
+本目录**已初始化本地 git 仓库**（`main`，无 remote）：首个快照提交 `8816fe6`，覆盖源码 / 配置 / 文档 / 测试夹具，`data/`、`reports/`、`logs/`、浏览器 profile、`*.db`、`*.bak*` 均在 `.gitignore` 中。回退代码可以用 `git diff` / `git checkout`；**数据回退仍只能靠 `data/xianyu.db.bak-*` 手动替换**。仓库没有配置 `user.name/email`，不要为此改全局 git 配置。
 
 ## 2. 安全红线（必须逐条遵守）
 
 1. **不要擅自发真实闲鱼请求**。任何 `scan` / `loop` / 打开真实搜索页 / 补抓第 2 页 / 重抓请求体，都必须先得到主人明确批准。
 2. **不要动 `option1-cdp`**。
-3. **不要运行 `release.ps1`**。它会执行 `git add -A`、`git commit`、`git push`，而本目录还没有 git 仓库。
+3. **不要运行 `release.ps1`**。它会执行 `git add -A`、`git commit`、`git push`；本目录虽已初始化本地仓库，但**没有 remote、也不该 push**。
 4. **任何打包、压缩、交接、上传都不能包含**：
    - `data/browser_profile/`
    - `data/browser_tmp/`
@@ -46,7 +46,8 @@ data/xianyu.db             真实扫描库
 ## 3. 当前版本与完成度
 
 - `VERSION`：**`3.8.4`**（`xianyu/__init__.py` 同步；自测会校验两者一致）
-- **离线自测：571 项全部通过**（v3.8.4 的 526 项 + 价格筛选 9 + 安全加固 9 + P1 13 + P2 14）
+- **离线自测：574 项全部通过**（v3.8.4 的 526 项 + 价格筛选 9 + 安全加固 9 + P1 13 + P2 14 + 锁残留 3）
+- **本地 git 快照**：`main` 首个提交 `8816fe6`（源码 / 配置 / 文档 / 测试夹具；不含 data/reports/logs/profile），无 remote
 - README / CHANGELOG **已同步**（忽略键用法、新词表、不符合跨轮保留；自测计数以本节为准）
 - `reports/latest.html`：**scan #8 重筛轮报表**（78 待审核 / **80** 不符合 = 本轮 29 + 跨轮 51；存档 `reports/scan_20261023_090949.*`）；#7 重筛轮存档 `reports/scan_20261023_080045.*`（107 待审核 / 51 不符合）保留
 - 2026-10-23 06:41 按主人批准做过一次最小实跑（1 关键词 × 1 页，2 个搜索请求）；预算 `{"day":"2026-10-23","used":2}`，无风控、无 Baxia。
@@ -55,7 +56,7 @@ data/xianyu.db             真实扫描库
 - 2026-10-23 08:57 按主人要求（词表扩充 + 报表忽略键 + 问题机词）完成 **v3.8.4 重筛写库**（轮次 #8，`rescreen --write`）：107 待审核 → 保留 **78** / 移出 **29**（新卖家词 28：电脑 11、包换 4、严选 4、电子 4、科技 2、二手 2、小铺 1；问题机 1）；写库前备份 `data/xianyu.db.bak-before-v384-rescreen-20261023`（107 待审核，可回退）。
 - 真实库 `data/xianyu.db` 当前：**待审核 78 / 已忽略 80**（51 来自 #7 + 29 来自 #8，note 均带 `重筛排除：` 前缀）、扫描 8 轮；seller 画像三列已由 #5 轮触发 `_migrate` 补上。
 
-## 4. 已完成的代码改动（无 git 仓库，未提交；文档已于 v3.8.1 复核时同步）
+## 4. 已完成的代码改动（已纳入本地 git 快照 `8816fe6`；文档随本次收尾同步）
 
 ### 4.1 卖家昵称新增排除词
 
@@ -87,13 +88,13 @@ data/xianyu.db             真实扫描库
 文件：
 
 - `xianyu/store.py:19` 新增 `MANUAL_REJECT_REASON = "人工审核"`
-- `xianyu/store.py:319` `rows_ignored()` 只返回自动忽略，人工忽略不再在这里重复展示
-- `xianyu/store.py:535` `mark_manual_reject()`
-- `xianyu/store.py:566` `restore_pending()`
-- `xianyu/review.py:274` 新增不符合卡片 `_reject_card()`
-- `xianyu/review.py:333` `_page()` 读取最新一轮的 `scan_rejects`
-- `xianyu/review.py:394` 新增「不符合」标签
-- `xianyu/review.py:440` `POST /api/status` 特殊处理 `ignored` / `pending`
+- `xianyu/store.py:335` `rows_ignored()` 只返回自动忽略，人工忽略不再在这里重复展示
+- `xianyu/store.py:584` `mark_manual_reject()`
+- `xianyu/store.py:617` `restore_pending()`
+- `xianyu/review.py:296` 新增不符合卡片 `_reject_card()`
+- `xianyu/review.py:371` `_page()` 读取最新一轮的 `scan_rejects`
+- `xianyu/review.py:442` 新增「不符合」标签
+- `xianyu/review.py:536` `do_POST` / `/api/status` 特殊处理 `ignored` / `pending`
 
 行为定义：
 
@@ -131,7 +132,7 @@ PYTHONIOENCODING=utf-8 E:/工具/python/python.exe tests/selftest.py
 预期最后一行：
 
 ```
-全部通过：520 项
+全部通过：574 项
 ```
 
 ### 4.4 v3.8.4 代码改动（卖家词 +8 / 报表忽略键 / 问题机词 +4）
@@ -226,7 +227,7 @@ PYTHONIOENCODING=utf-8 E:/工具/python/python.exe tests/selftest.py
 - `scans.pages` 存的是**搜索请求数**，不是页数。
 - 登录 cookie 只有 `unb`，缺 `sn/uc1/lgc`；代码告警后继续，搜索仍能返回 30 条。不要把它当成登录失败。
 - `data/demo.db.bak-before-replay-cleanup` 是上次清理前的备份，是否删除等主人决定。
-- `data/scan.lock` 存在时先查进程，不要直接删除。
+- `data/scan.lock` **文件存在不等于有人在跑**：锁是 OS 字节锁（第 0 字节），进程退出 / 崩溃后内核自动释放，文件里残留的 `pid=` 只是最后持有者的文本。判断方法：真的能拿到锁就说明没人占用，不需要删文件；拿不到时错误信息里会带持有者 `pid=... started=...`，再去 `tasklist` 对照。已加回归测试 `test_scan_lock` 覆盖「残留锁文件不阻塞」。
 
 ## 8. 「为什么没有几十分钟前发布」——已定位、已修复（v3.8.0）
 
@@ -454,6 +455,8 @@ PYTHONIOENCODING=utf-8 E:/工具/python/python.exe -m xianyu review
 - 自测 544 → **557 项**（新增翻页部分结果、中断后预算仍落盘、未收尾轮次过滤、登录 cookie 占位值断言）。
 - **P2 收口**：① 审核页端口归 `config.review.port`（默认 8765），报表忽略键在生成时注入，不再写死；`review --port` 仅临时覆盖并提示；② CLI `mark <id> ignored` 改走 `mark_manual_reject`（写人工不符合明细），`mark <id> pending` 改走 `restore_pending`（清备注 + 撤明细），与审核页语义一致；③ 熔断冷却期内再次触发改为 `max(原冷却, 新冷却)`，`--force` 强跑后不会缩短原冷却；④ 配置里的空列表（`seller_exclude: []`、`boot_reject: []`、`category.exclude: []` 等）不再被默认词表顶掉，显式 `[]` = 关闭。
 - 自测 557 → **571 项**（新增 14 项：端口注入 ×2、config 空列表 ×6、CLI mark 语义 ×5、冷却不缩短 ×1）。
+- **收尾三件（P2 之后）**：① `data/scan.lock` 残留核查——锁是 OS 字节锁，进程死亡即释放，残留文本不影响下次获取（新增 `test_scan_lock`：持锁写持有者 / 二次进入被拒并报 pid / 伪造残留 pid 不阻塞）；② 本地 git 仓库初始化（`main`，首个提交 `8816fe6`，`.gitignore` 补 `.workbuddy/`、`*.bak*`，未配置 remote、未 push）；③ 文档旧计数 520/571 统一为 574，`store.py` / `review.py` 行号引用按当前代码校正。
+- 自测 571 → **574 项**（新增 3 项锁语义）。
 
 没做（都需要主人先点头）：再跑真实轮次验证单关键词产出；D2 阈值升级为硬门槛；P1.5 粗筛不符合恢复（注：重筛移出的商品现已可通过审核页「恢复待审核」撤回，与人工忽略一致）。安全红线不变，见第 2 节。
 

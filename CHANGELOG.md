@@ -1,6 +1,38 @@
 # 更新日志
 
-每个版本对应一个 git tag（`v1.0.0`、`v1.0.1` …），随时可以回退。
+早期版本按 git tag（`v1.0.0`、`v1.0.1` …）管理。本目录的本地仓库于 2026-10-23 才初始化（`main`，首个快照 `8816fe6`，无 remote、未打 tag），所以此前的 tag 在当前仓库里不存在；数据回退仍以 `data/xianyu.db.bak-*` 为准。
+
+## 未发版 · v3.8.4 之后的小修 — 2026-10-23
+
+v3.8.4 发布后按「先修安全、再修稳定性、最后收尾」三轮做的补丁，未升版本号。
+
+**1. 安全加固**
+
+- 审核页 CORS 从 `*` 收紧为白名单：仅 `file://`（`Origin: null`）与本机同端口源回显；所有请求校验 Host 必须是 `127.0.0.1` / `localhost`（防 DNS rebinding）；POST 只收 `application/json`、请求体 ≤ 64KB。
+- CSV 公式注入：`write_csv` / `write_reject_csv` 对以 `= + - @ TAB CR` 开头的文本加 `'` 前缀。
+
+**2. P1 稳定性**
+
+- 每日预算改为搜索请求一发出即落盘（`crawler.on_request` 回调），Ctrl-C / 崩溃不再少算；回调漏计时在轮末补差额。
+- 第 2 页翻页失败保留第 1 页数据，记软失败（`last_search_error`）不再整轮丢弃。
+- `latest_scan` / `mark_manual_reject` 只认 `finished_at IS NOT NULL` 的轮次，半途轮次不会被报表或人工忽略锚定。
+- 登录 cookie 的 `0 / null / undefined` 统一按未登录处理。
+
+**3. P2 收口**
+
+- 审核页端口归 `config.review.port`（默认 8765），报表「忽略」键生成时注入端口；`review --port` 仅临时覆盖并提示。
+- CLI `mark <id> ignored` 走 `mark_manual_reject`、`mark <id> pending` 走 `restore_pending`，与审核页语义一致。
+- 熔断冷却期内再次触发改为 `max(原冷却, 新冷却)`，强跑不会缩短原冷却。
+- config 显式 `[]` 表示关闭词表，不再被默认值顶掉。
+
+**4. 收尾**
+
+- `scan.lock` 残留核查：锁是 OS 字节锁，进程退出 / 崩溃后自动释放，残留 `pid=` 文本不阻塞；新增回归测试。
+- 初始化本地 git 仓库（`main`，首个快照 `8816fe6`）；`.gitignore` 补 `.workbuddy/`、`*.bak*`。
+
+**自测 526 → 574 项全绿**
+
+安全 9 + P1 13 + P2 14 + 锁 3，以及既有的价格筛选 9。`python -m pytest` 未引入，仍用 `tests/selftest.py`。
 
 ## v3.8.4 — 2026-10-23
 
